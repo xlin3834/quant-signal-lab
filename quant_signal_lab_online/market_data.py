@@ -98,7 +98,7 @@ def parse_candles(rows):
     return df.sort_values("time").drop_duplicates("time").reset_index(drop=True)
 
 
-def closed_candles(data, interval, now=None):
+def closed_candles(data, interval, now=None, min_bars=50):
     """Check freshness on every use, including Streamlit cache hits."""
     _, duration = INTERVALS[interval]
     now = pd.Timestamp.now(tz="UTC") if now is None else now
@@ -108,8 +108,8 @@ def closed_candles(data, interval, now=None):
     closed = data.loc[data["time"] + duration <= now]
     if closed.empty or now - (closed["time"].iloc[-1] + duration) >= duration + pd.Timedelta(seconds=60):
         raise MarketDataError("Bitget 行情已过期，已暂停计算指标和模拟信号")
-    if len(closed) < 50:
-        raise MarketDataError("已收盘 K 线不足 50 根，无法计算所需指标")
+    if len(closed) < min_bars:
+        raise MarketDataError(f"已收盘 K 线不足 {min_bars} 根，无法计算所需指标")
     if not closed["time"].diff().iloc[1:].eq(duration).all():
         raise MarketDataError("Bitget K 线时间戳不连续，已暂停生成模拟信号")
     return closed

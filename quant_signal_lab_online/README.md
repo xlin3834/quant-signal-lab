@@ -67,3 +67,26 @@ docker exec qsl-paper python paper.py status
 cd quant_signal_lab_online
 python -m unittest -v
 ```
+
+## 5.0 Ultimate P0 行情监控
+
+原入口和现货功能继续使用。最新成交区默认显示 REST 快照，15 秒缓存、约 20 秒页面取样；闭合 K 线和信号的更新独立运行。配置独立网关后，前端每 5 秒读取该网关的 WebSocket 缓存，仅在交易所时间戳与接收时间有效时标记为 WebSocket。REST 回退会单独标注。行情时间到网关接收时差含时钟误差，不是浏览器端延迟，也不能视作逐笔成交的真实传输时间。
+
+在获授权的常驻主机上可运行：
+
+```bash
+cd quant_signal_lab_online
+python live_market.py --host 127.0.0.1 --port 8765
+curl 'http://127.0.0.1:8765/ticker?symbol=BTCUSDT'
+curl 'http://127.0.0.1:8765/health'
+```
+
+同机 Streamlit 设置 `QSL_MARKET_URL=http://127.0.0.1:8765`。Community Cloud 如需访问该服务，应通过 HTTPS 反向代理暴露只读端点并限速。网关根据访问续订所选品种，最后一次访问后约 120 秒释放，不在 Streamlit 页面中维持后台进程。当前网关只推送现货 ticker，未收盘实时 K 线与永续市场留待 P1/P2。
+
+官方双端点一致性检查：
+
+```bash
+python verify_market.py --output /tmp/bitget-spot-differences.csv
+```
+
+比较同一交易对、周期和已收盘时间的 OHLC、基础币成交量和收盘时间。差异报告保留缺失和不一致字段。页面另支持参考 CSV 和指标比对，报告会区分数据口径与指标公式／预热的可能影响。开发审计、付费评估和后续阶段见 [P0_AUDIT.md](P0_AUDIT.md)。如需回滚，使用普通 `git revert <P0提交>` 并推送至原分支。

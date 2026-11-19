@@ -5,6 +5,7 @@ from backtest import Costs
 from market_data import INTERVALS, SYMBOLS
 from signals import Rules
 from ui import backtest_panel, input_parameters, market_workspace, paper_panel
+from quote_ui import quote_panel
 
 st.set_page_config(page_title="Quant Signal Lab 4.0", layout="wide")
 st.markdown("""
@@ -41,6 +42,7 @@ if params.macd[0] >= params.macd[1] or threshold > strong:
 
 rules = Rules(threshold, strong, minimum_rr)
 costs = Costs(capital, risk / 100, fee / 100, slip / 100)
+quote_panel(symbol)
 market_workspace(symbol, interval, sort, params, rules, costs)
 with st.expander("策略回测与交易记录"):
     backtest_panel(symbol, interval, params, rules, costs)

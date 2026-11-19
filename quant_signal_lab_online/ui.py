@@ -9,6 +9,7 @@ import streamlit as st
 
 from backtest import Costs, evaluate
 from charts import market_figure
+from comparison import compare
 from indicators import Parameters, calculate, warmup_bars
 from legacy import backtest as legacy_backtest
 from legacy import calc as legacy_calculate
@@ -127,7 +128,20 @@ def market_workspace(symbol, interval, sort, params, rules, costs):
             data = ready
         st.plotly_chart(market_figure(data.tail(250), params, ready), width="stretch",
                         config={"displaylogo": False, "responsive": True, "scrollZoom": True})
+        data = data.assign(close_time=data.time + INTERVALS[interval][1])
         st.download_button("导出 K 线 CSV", data.to_csv(index=False), "candles.csv", "text/csv")
+        with st.expander("行情一致性报告"):
+            st.caption("上传与此品种、周期及成交量单位一致的参考 CSV。请使用带时区的开盘和收盘时间。")
+            file = st.file_uploader("参考 K 线 CSV", type="csv")
+            if file is not None:
+                try:
+                    matched, report = compare(data, pd.read_csv(file), params)
+                except (ValueError, TypeError, pd.errors.ParserError) as exc:
+                    st.error(f"无法比较参考行情：{exc}")
+                else:
+                    st.write(f"时间匹配 {matched} 根 K 线 · {len(report)} 项差异")
+                    st.dataframe(report, hide_index=True, width="stretch")
+                    st.download_button("下载差异 CSV", report.to_csv(index=False), "differences.csv", "text/csv")
     with right:
         signal_panel(last, costs, rules)
 
