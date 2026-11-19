@@ -6,8 +6,9 @@ from market_data import INTERVALS, SYMBOLS
 from signals import Rules
 from ui import backtest_panel, input_parameters, market_workspace, paper_panel
 from quote_ui import quote_panel
+from perpetual_ui import perpetual_workspace
 
-st.set_page_config(page_title="Quant Signal Lab 4.0", layout="wide")
+st.set_page_config(page_title="Quant Signal Lab 5.0 · P1", layout="wide")
 st.markdown("""
 <style>
 .block-container {padding-top: 2.4rem; max-width: 1640px;}
@@ -18,8 +19,14 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
-st.title("Quant Signal Lab 4.0")
-st.caption("现货市场研究 · 历史回测 · 模拟资金")
+st.title("Quant Signal Lab 5.0 · P1")
+st.caption("永续与现货市场研究 · 历史回测 · 模拟资金")
+market = st.radio("市场", ("Bitget USDT 永续", "Bitget 现货"), horizontal=True)
+if market == "Bitget USDT 永续":
+    perpetual_workspace()
+    with st.expander("现货模拟账户与服务健康"):
+        paper_panel()
+    st.stop()
 
 asset, period, sorting = st.columns(3)
 symbol = asset.selectbox("交易对", SYMBOLS)
