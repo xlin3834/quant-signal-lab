@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 import pandas as pd
 import requests
 
-from market_data import MarketDataError, closed_candles, fetch_candles, parse_candles
+from market_data import MarketDataError, active_forming, capture_forming, closed_candles, fetch_candles, parse_candles
 
 
 class MarketDataTests(unittest.TestCase):
@@ -51,6 +51,26 @@ class MarketDataTests(unittest.TestCase):
         })
         self.assertEqual(get.call_args.kwargs["timeout"], (3, 8))
         self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+
+    def test_forming_candle_stays_out_of_the_closed_series(self):
+        start = pd.Timestamp("2026-11-19T12:00:00Z")
+        times = pd.date_range(end=start, periods=51, freq="5min")
+        candles = pd.DataFrame({"time": times, "open": 10., "high": 11., "low": 9.,
+                                "close": 10.5, "volume": 1.})
+        now = start + pd.Timedelta(minutes=2)
+        closed = closed_candles(candles, "5m", now)
+        forming = capture_forming(candles, "5m", now, closed)
+        self.assertEqual(len(closed), 50)
+        self.assertNotIn(start, set(closed.time))
+        self.assertEqual(forming["time"], start)
+        self.assertEqual(forming["close"], 10.5)
+        self.assertEqual(active_forming(forming, "5m", now, closed.time.iloc[-1])["time"], start)
+        self.assertIsNone(active_forming(forming, "5m", start + pd.Timedelta(minutes=5), closed.time.iloc[-1]))
+        self.assertIsNone(active_forming(forming, "5m", now, closed.time.iloc[-2]))
+        self.assertIsNone(capture_forming(candles.iloc[:-1], "5m", now, closed))
+        broken = candles.copy()
+        broken.loc[broken.index[-1], "low"] = 12
+        self.assertIsNone(capture_forming(broken, "5m", now, closed_candles(broken, "5m", now)))
 
     @patch("market_data.requests.get")
     def test_http_400_reports_exchange_code_without_retry(self, get):

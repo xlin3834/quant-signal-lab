@@ -38,6 +38,52 @@ class StrategyTests(unittest.TestCase):
         self.assertTrue((full.closed_4H <= full.decision_time).all())
         self.assertTrue(full.score_long.between(0, 100).all())
 
+    def test_forming_bar_does_not_change_closed_signal(self):
+        from market_data import active_forming, capture_forming, closed_candles
+
+        frames = {"15m": sample(), "5m": sample("5min", 1200),
+                  "1H": sample("1h"), "4H": sample("4h")}
+        last = frames["15m"].time.iloc[-1]
+        now = last + pd.Timedelta(minutes=16)
+        extra = frames["15m"].iloc[[-1]].copy()
+        extra.loc[:, "time"] = last + pd.Timedelta(minutes=15)
+        extra.loc[:, ["open", "high", "low", "close"]] = [140., 150., 130., 145.]
+        raw = pd.concat([frames["15m"], extra], ignore_index=True)
+        closed = closed_candles(raw, "15m", now, min_bars=50)
+        forming = capture_forming(raw, "15m", now, closed)
+        self.assertEqual(forming["close"], 145.)
+        self.assertIsNotNone(active_forming(forming, "15m", now, closed.time.iloc[-1]))
+        pd.testing.assert_frame_equal(closed.reset_index(drop=True), frames["15m"].reset_index(drop=True))
+        pd.testing.assert_frame_equal(score_frames(aligned_frames(frames)),
+                                      score_frames(aligned_frames({**frames, "15m": closed})))
+
+    def test_chart_keeps_closed_candles_until_a_forming_bar_is_supplied(self):
+        from charts import market_figure
+
+        full = calculate(sample(count=600))
+        plain = market_figure(full, Parameters())
+        self.assertEqual(len(plain.data), 16)
+        self.assertNotIn("未收盘", [trace.name for trace in plain.data])
+        forming = {"time": full.time.iloc[-1] + pd.Timedelta(minutes=15),
+                   "open": 101., "high": 102., "low": 100., "close": 101.5, "volume": 4.}
+        shown = market_figure(full, Parameters(), forming=forming)
+        self.assertEqual([trace.name for trace in shown.data].count("未收盘"), 1)
+        hidden = market_figure(full, Parameters(), show=frozenset({"ema", "volume", "macd", "rsi"}))
+        quiet = [trace for trace in hidden.data if str(trace.name).startswith("BOLL") or trace.name in ("压力", "支撑")]
+        self.assertTrue(quiet)
+        self.assertTrue(all(trace.visible == "legendonly" for trace in quiet))
+        averages = [trace for trace in hidden.data if str(trace.name).startswith("EMA")]
+        self.assertTrue(all(trace.visible is True for trace in averages))
+
+    def test_missing_market_fields_stay_readable(self):
+        from ui import direction_text, optional_number
+
+        self.assertEqual(optional_number(float("nan"), ".1f"), "缺失")
+        self.assertEqual(optional_number(None, ".1f"), "缺失")
+        self.assertEqual(optional_number(12.34, ".1f"), "12.3")
+        self.assertEqual(direction_text(float("nan")), "缺失")
+        self.assertEqual(direction_text(1), "多")
+
 
 class FillAndWorkerTests(unittest.TestCase):
     def test_fill_stop_first_with_gap_and_costs(self):
@@ -155,3 +201,78 @@ class FillAndWorkerTests(unittest.TestCase):
             state = advance(db, "BTCUSDT", data, data.time.iloc[1] + pd.Timedelta(minutes=15))
             self.assertFalse(state["day_halt"])
             self.assertIsNotNone(state["pending"])
+
+    def test_failed_poll_keeps_pending_plan_and_uses_wal(self):
+        from contextlib import closing
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from market_data import MarketDataError
+        from paper import advance, connect, record_failure
+
+        data = sample(count=4)
+        data["side"], data["stop_long"], data["target1_long"], data["target2_long"] = 1, 98., 104., 108.
+        with TemporaryDirectory() as folder:
+            db = Path(folder) / "paper.db"
+            state = advance(db, "BTCUSDT", data.iloc[:1], data.time.iloc[1])
+            self.assertIsNotNone(state["pending"])
+            broken = data.drop(index=data.index[1])
+            with self.assertRaisesRegex(MarketDataError, "缺失"):
+                advance(db, "BTCUSDT", broken, broken.time.iloc[-1] + pd.Timedelta(minutes=15))
+            failed = record_failure(db, MarketDataError("模拟交易历史缺失，保留仓位并等待补齐"))
+            self.assertEqual(failed["pending"], state["pending"])
+            self.assertEqual(failed["last_bar"], state["last_bar"])
+            self.assertIsNone(failed["position"])
+            self.assertIn("缺失", failed["error"])
+            with closing(connect(db)) as conn:
+                self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+
+    def test_stop_without_a_gap_uses_the_risk_budget(self):
+        from types import SimpleNamespace
+        from backtest import Costs, new_position, process_bar
+
+        for costs in (Costs(fee=0, slip=0), Costs()):
+            plan = {"side": 1, "stop": 98, "target1": 104, "target2": 108}
+            position = new_position(plan, 100, costs.capital, costs, 1.5)
+            bar = SimpleNamespace(open=100, low=98, high=100.5, time="stop")
+            fills, leftover = process_bar(position, bar, costs)
+            self.assertIsNone(leftover)
+            self.assertAlmostEqual(fills[0]["pnl"], -costs.capital * costs.risk, places=6)
+
+    def test_research_stats_follow_closed_positions(self):
+        from backtest import Costs, simulate
+
+        start = pd.Timestamp("2026-11-20T00:00:00Z")
+
+        def scored(rows):
+            records = []
+            for index, changes in enumerate(rows):
+                row = {"time": start + pd.Timedelta(minutes=15 * index), "open": 100., "high": 101.,
+                       "low": 99., "close": 100., "side": 0, "stop_long": 98., "target1_long": 104.,
+                       "target2_long": 120., "stop_short": 102., "target1_short": 96., "target2_short": 94.}
+                row.update(changes)
+                records.append(row)
+            return pd.DataFrame(records)
+
+        costs = Costs(fee=0, slip=0)
+        stopped, _curve, _trades = simulate(scored([
+            {"side": 1},
+            {"low": 97},
+        ]), costs, 1.5)
+        self.assertEqual(stopped["交易次数"], 1)
+        self.assertEqual(stopped["盈利因子"], 0)
+        self.assertAlmostEqual(stopped["净收益 USDT"], -5)
+        self.assertAlmostEqual(stopped["平均每笔盈亏 USDT"], -5)
+        self.assertEqual(stopped["最大连续亏损次数"], 1)
+        self.assertEqual(stopped["收盘持仓占比 %"], 0)
+
+        mixed, _curve, trades = simulate(scored([
+            {"side": 1},
+            {"high": 105},
+            {"low": 97},
+        ]), costs, 1.5)
+        self.assertEqual(len(trades), 2)
+        self.assertEqual(mixed["交易次数"], 1)
+        self.assertIsNone(mixed["盈利因子"])
+        self.assertAlmostEqual(mixed["净收益 USDT"], 2.5)
+        self.assertEqual(mixed["最大连续亏损次数"], 0)
+        self.assertAlmostEqual(mixed["收盘持仓占比 %"], 100 / 3)

@@ -160,13 +160,72 @@ def fetch_history(symbol, interval, count, now=None):
     return closed_candles(data, interval, now)
 
 
-def load_frames(symbol, counts=None):
+def capture_forming(data, interval, now, closed):
+    """Return the candle that was still open in this response, when it continues the closed series.
+
+    Callers must not put this bar into indicators or signals. A later clock can only
+    hide it; the partial OHLC stays out of the closed frame until a new download.
+    """
+    _, duration = INTERVALS[interval]
+    if closed is None or len(closed) == 0:
+        return None
+    try:
+        expected = pd.Timestamp(closed["time"].iloc[-1]) + duration
+        rows = data.loc[data["time"] == expected]
+    except (TypeError, KeyError, ValueError, OverflowError):
+        return None
+    if len(rows) != 1:
+        return None
+    row = rows.iloc[0]
+    try:
+        open_time = pd.Timestamp(row.time)
+        if open_time > now or open_time + duration <= now:
+            return None
+        bar = {"time": open_time, "open": float(row.open), "high": float(row.high),
+               "low": float(row.low), "close": float(row.close), "volume": float(row.volume)}
+    except (TypeError, ValueError, KeyError, AttributeError, OverflowError):
+        return None
+    if not np.isfinite([bar[key] for key in ("open", "high", "low", "close", "volume")]).all():
+        return None
+    if min(bar["open"], bar["close"], bar["low"]) <= 0 or bar["volume"] < 0:
+        return None
+    if bar["low"] > min(bar["open"], bar["close"]) or bar["high"] < max(bar["open"], bar["close"]):
+        return None
+    return bar
+
+
+def active_forming(bar, interval, now, last_open):
+    """Show a captured forming candle only while its own interval is still open."""
+    if not isinstance(bar, dict):
+        return None
+    _, duration = INTERVALS[interval]
+    try:
+        open_time = pd.Timestamp(bar["time"])
+        anchor = pd.Timestamp(last_open)
+        if open_time != anchor + duration or open_time > now or open_time + duration <= now:
+            return None
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return None
+    return bar
+
+
+def load_market(symbol, counts=None):
+    """Closed research frames, plus any candle that was still forming at download time."""
     intervals = ("15m", "4H", "1H", "5m")
     # Use one observation time, but validate after the requests so boundary rollovers
     # do not make an exchange candle appear to open in the future.
     if counts is not None:
-        return {interval: fetch_history(symbol, interval, counts[interval]) for interval in intervals}
+        closed = {interval: fetch_history(symbol, interval, counts[interval]) for interval in intervals}
+        return closed, {interval: None for interval in intervals}
     raw = {interval: fetch_candles(symbol, interval, 1000 if interval == "5m" else 950)
            for interval in intervals}
     now = pd.Timestamp.now(tz="UTC")
-    return {interval: closed_candles(data, interval, now) for interval, data in raw.items()}
+    closed, forming = {}, {}
+    for interval, data in raw.items():
+        closed[interval] = closed_candles(data, interval, now)
+        forming[interval] = capture_forming(data, interval, now, closed[interval])
+    return closed, forming
+
+
+def load_frames(symbol, counts=None):
+    return load_market(symbol, counts)[0]

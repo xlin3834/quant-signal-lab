@@ -8,12 +8,13 @@ import pandas as pd
 import streamlit as st
 
 from backtest import Costs, evaluate
-from charts import market_figure
+from charts import LAYER_LABELS, layers_from, market_figure
 from comparison import compare
 from indicators import Parameters, calculate, warmup_bars
 from legacy import backtest as legacy_backtest
 from legacy import calc as legacy_calculate
-from market_data import INTERVALS, MarketDataError, closed_candles, fetch_candles, fetch_tickers, load_frames
+from market_data import (INTERVALS, MarketDataError, active_forming, capture_forming, closed_candles,
+                         fetch_candles, fetch_tickers, load_frames, load_market)
 from paper import snapshot
 from signals import aligned_frames, score_frames
 
@@ -21,14 +22,39 @@ LOGGER = logging.getLogger(__name__)
 DIRECTION = {1: "多", -1: "空", 0: "中性"}
 
 
+def optional_number(value, spec):
+    if value is None or pd.isna(value):
+        return "缺失"
+    return format(float(value), spec)
+
+
+def direction_text(value):
+    try:
+        if pd.isna(value) or float(value) not in DIRECTION:
+            return "缺失"
+    except (TypeError, ValueError):
+        return "缺失"
+    return DIRECTION[int(value)]
+
+
+def layer_picker(key):
+    names = [label for label, _layer in LAYER_LABELS]
+    chosen = st.multiselect("图表图层", names, names, key=key,
+                            help="隐藏图层只影响图形，不改变指标和评分。")
+    return layers_from(chosen)
+
+
 @st.cache_data(ttl=40, show_spinner=False, max_entries=32)
 def recent(symbol):
-    return load_frames(symbol)
+    return load_market(symbol)
 
 
-@st.cache_data(ttl=40, show_spinner=False, max_entries=32)
-def chart_data(symbol, interval):
-    return fetch_candles(symbol, interval, 950)
+@st.cache_data(ttl=40, show_spinner=False, max_entries=8)
+def chart_bundle(symbol, interval):
+    raw = fetch_candles(symbol, interval, 1000 if interval == "5m" else 950)
+    observed = pd.Timestamp.now(tz="UTC")
+    closed = closed_candles(raw, interval, observed)
+    return closed, capture_forming(raw, interval, observed, closed)
 
 
 @st.cache_data(ttl=40, show_spinner=False, max_entries=2)
@@ -77,8 +103,8 @@ def market_list(sort):
 
 def signal_panel(last, costs, rules):
     st.subheader("多周期信号")
-    st.caption(f"4小时 {DIRECTION.get(last.direction_4H, '缺失')} · "
-               f"1小时 {DIRECTION.get(last.direction_1H, '缺失')} · 5分钟 RSI {last.rsi_5m:.1f}")
+    st.caption(f"4小时 {direction_text(last.direction_4H)} · "
+               f"1小时 {direction_text(last.direction_1H)} · 5分钟 RSI {optional_number(last.rsi_5m, '.1f')}")
     st.write(f"做多 **{last.score_long}/100** · 做空 **{last.score_short}/100**")
     st.caption("评分表示规则满足程度。15 分钟收盘触发。")
     st.caption(last.decision_time.strftime("%Y-%m-%d %H:%M UTC"))
@@ -93,8 +119,8 @@ def signal_panel(last, costs, rules):
         return
     side = "long" if last.side == 1 else "short"
     st.markdown(f"**{'做多' if last.side == 1 else '做空'} · {last.grade}**")
-    price = lambda field: f"{last[f'{field}_{side}']:,.6g}"
-    st.write(f"参考入场 {last.close:,.6g} · 止损 {price('stop')}")
+    price = lambda field: optional_number(last[f"{field}_{side}"], ",.6g")
+    st.write(f"参考入场 {optional_number(last.close, ',.6g')} · 止损 {price('stop')}")
     st.write(f"止盈一 {price('target1')} · 止盈二 {price('target2')}")
     st.write(f"目标一净盈亏比 {price('rr')} · 模拟风险预算 {costs.capital * costs.risk:,.2f} USDT")
     st.caption("触及止损、行情过期或开盘计入成本后盈亏比不足时失效。")
@@ -105,13 +131,19 @@ def signal_panel(last, costs, rules):
 def market_workspace(symbol, interval, sort, params, rules, costs):
     try:
         now = pd.Timestamp.now(tz="UTC")
-        frames = recent(symbol)
-        # Validate cached entries on every request. Use a fresh clock after network calls.
+        frames, forming_map = recent(symbol)
+        # Validate cached closed bars on every request. Partials stay in forming_map and
+        # are never promoted into indicators when the clock crosses a boundary.
         now = max(now, pd.Timestamp.now(tz="UTC"))
         frames = {key: closed_candles(value, key, now) for key, value in frames.items()}
         ready = score_frames(aligned_frames(frames, params), rules, costs.fee, costs.slip)
-        chart = frames[interval] if interval in frames else closed_candles(chart_data(symbol, interval), interval)
-        data = calculate(chart, params)
+        if interval in frames:
+            chart, captured = frames[interval], forming_map.get(interval)
+        else:
+            chart, captured = chart_bundle(symbol, interval)
+            chart = closed_candles(chart, interval, now)
+        data = ready if interval == "15m" else calculate(chart, params)
+        forming = active_forming(captured, interval, now, data.time.iloc[-1])
     except MarketDataError as exc:
         LOGGER.warning("行情不可用 %s %s: %s", symbol, interval, exc)
         st.error(f"Bitget 行情不可用，信号已暂停。{exc}")
@@ -119,17 +151,21 @@ def market_workspace(symbol, interval, sort, params, rules, costs):
     last = ready.iloc[-1]
     st.caption(f"● Bitget 公开现货 · 最近已收盘 "
                f"{(data.time.iloc[-1] + INTERVALS[interval][1]):%Y-%m-%d %H:%M UTC} "
-               f"· 收盘 {data.close.iloc[-1]:,.5g} · ATR {data.atr.iloc[-1]:,.5g}")
+               f"· 收盘 {optional_number(data.close.iloc[-1], ',.5g')} · ATR {optional_number(data.atr.iloc[-1], ',.5g')}")
+    if forming is not None:
+        opened = pd.Timestamp(forming["time"])
+        st.caption(f"未收盘 K 线 {opened:%Y-%m-%d %H:%M} UTC 开盘 · 最新价 {forming['close']:,.5g} · "
+                   "不参与指标、评分、回测和模拟")
     left, center, right = st.columns([1.6, 4.4, 2])
     with left:
         market_list(sort)
     with center:
-        if interval == "15m":
-            data = ready
-        st.plotly_chart(market_figure(data.tail(250), params, ready), width="stretch",
-                        config={"displaylogo": False, "responsive": True, "scrollZoom": True})
+        show = layer_picker("spot_layers")
+        st.plotly_chart(market_figure(data.tail(250), params, ready, forming=forming, show=show),
+                        width="stretch", config={"displaylogo": False, "responsive": True, "scrollZoom": True})
         data = data.assign(close_time=data.time + INTERVALS[interval][1])
-        st.download_button("导出 K 线 CSV", data.to_csv(index=False), "candles.csv", "text/csv")
+        st.download_button("导出 K 线 CSV", data.to_csv(index=False), "candles.csv", "text/csv",
+                           help="只含已收盘 K 线。")
         with st.expander("行情一致性报告"):
             st.caption("上传与此品种、周期及成交量单位一致的参考 CSV。请使用带时区的开盘和收盘时间。")
             file = st.file_uploader("参考 K 线 CSV", type="csv")
@@ -151,7 +187,8 @@ def backtest_panel(symbol, interval, params, rules, costs):
     mode = st.radio("策略", ("多周期评分", "原版 EMA 交叉"), horizontal=True)
     if mode == "原版 EMA 交叉":
         try:
-            bars = closed_candles(chart_data(symbol, interval), interval).tail(199)
+            closed, _forming = chart_bundle(symbol, interval)
+            bars = closed_candles(closed, interval).tail(199)
         except MarketDataError as exc:
             st.error(str(exc))
             return
@@ -193,7 +230,8 @@ def backtest_panel(symbol, interval, params, rules, costs):
         st.dataframe(trades, hide_index=True, width="stretch")
         st.download_button(f"导出{name}交易记录 CSV", trades.to_csv(index=False),
                            f"{name}-trades.csv", "text/csv")
-    st.caption("样本外结果仅是历史模拟，阈值比较可能过拟合。")
+    st.caption("样本外结果仅是历史模拟，阈值比较可能过拟合。盈利因子是已平仓盈利额除以亏损额，"
+               "没有亏损时不显示。收盘持仓占比只计算收盘时仍有仓位的 K 线。")
 
 
 @st.fragment(run_every=45)

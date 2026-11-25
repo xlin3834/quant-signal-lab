@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from market_data import MarketDataError
-from perpetual_market import build_rows, load_directory, load_tickers, read_favorites, visible_rows
+from perpetual_market import build_rows, fetch_candles, load_directory, load_tickers, read_favorites, visible_rows
 
 NOW = 1_795_113_000_000
 
@@ -47,6 +47,10 @@ class PerpetualMarketTests(unittest.TestCase):
                          (10., 100., 3., .02))
         self.assertAlmostEqual(first["spread_pct"], .2)
         self.assertAlmostEqual(first["range_pct"], 50)
+        self.assertIsNone(first["mark"])
+        self.assertIsNone(first["index"])
+        self.assertIsNone(first["basis"])
+        self.assertIsNone(first["holding"])
         self.assertIsNone(missing["price"])
         self.assertIsNone(missing["timestamp"])
 
@@ -78,3 +82,41 @@ class PerpetualMarketTests(unittest.TestCase):
         self.assertIsNone(row["spread_pct"])
         future = {**row, "price": 10}
         self.assertEqual(visible_rows([future], "", "全部合约", (), NOW)[0]["state"], "时钟异常")
+
+    def test_mark_index_basis_open_interest_and_case_insensitive_search(self):
+        good = snapshot("AAAUSDT", markPrice="10.5", indexPrice="9.5", holdingAmount="3.5")
+        bad = snapshot("BBBUSDT", lastPr="nan", markPrice="-1", indexPrice="0", holdingAmount="-4")
+        rows = build_rows({"AAAUSDT": contract("AAAUSDT", baseCoin="btc"), "BBBUSDT": contract("BBBUSDT")},
+                          [good, bad])
+        first, second = rows
+        self.assertEqual((first["mark"], first["holding"]), (10.5, 3.5))
+        self.assertAlmostEqual(first["basis"], 100 * (10 - 9.5) / 9.5)
+        self.assertIsNone(second["price"])
+        self.assertIsNone(second["mark"])
+        self.assertIsNone(second["index"])
+        self.assertIsNone(second["basis"])
+        self.assertIsNone(second["holding"])
+        self.assertEqual(visible_rows(rows, "btc", "全部合约", (), NOW)[0]["symbol"], "AAAUSDT")
+        self.assertEqual(read_favorites(["btcusdt", "ETHUSDT", "btcusdt"]), ("BTCUSDT", "ETHUSDT"))
+        self.assertEqual(read_favorites(None), ())
+
+    @patch("perpetual_market.request_data")
+    def test_last_price_candles_use_the_market_type_and_clamp_limit(self, request):
+        request.return_value = [
+            ["1795104000000", "10", "11", "9", "10", "1", "10"],
+            ["1795104900000", "10", "11", "9", "10", "1", "10"],
+        ]
+        frame = fetch_candles("BTCUSDT", "15m", 5000)
+        self.assertEqual(frame.close.tolist(), [10., 10.])
+        self.assertEqual(request.call_args.args, ("https://api.bitget.com/api/v2/mix/market/candles", {
+            "symbol": "BTCUSDT", "productType": "USDT-FUTURES", "granularity": "15m",
+            "kLineType": "market", "limit": "1000",
+        }))
+
+    def test_unknown_contract_interval_does_not_request(self):
+        with patch("perpetual_market.request_data") as request:
+            with self.assertRaisesRegex(MarketDataError, "周期"):
+                fetch_candles("BTCUSDT", "2H")
+            with self.assertRaisesRegex(MarketDataError, "代码"):
+                fetch_candles("btcusdt", "15m")
+            request.assert_not_called()
