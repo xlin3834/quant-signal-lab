@@ -3,8 +3,9 @@ import streamlit as st
 
 from backtest import Costs
 from market_data import INTERVALS, SYMBOLS
+from preset_ui import spot_sidebar
 from signals import Rules
-from ui import backtest_panel, input_parameters, market_workspace, paper_panel
+from ui import backtest_panel, market_workspace, paper_panel
 from quote_ui import quote_panel
 from perpetual_ui import perpetual_workspace
 
@@ -20,38 +21,33 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 st.title("Quant Signal Lab 5.0 · P1")
-st.caption("永续与现货市场研究 · 历史回测 · 模拟资金")
-market = st.radio("市场", ("Bitget USDT 永续", "Bitget 现货"), horizontal=True)
+st.caption("永续与现货市场研究 · 历史回测 · 模拟资金 · 研究平台")
+market = st.radio("市场", ("Bitget USDT 永续", "Bitget 现货", "研究平台"), horizontal=True)
 if market == "Bitget USDT 永续":
     perpetual_workspace()
     with st.expander("现货模拟账户与服务健康"):
         paper_panel()
+    st.stop()
+if market == "研究平台":
+    from platform_ui import platform_page
+    platform_page()
     st.stop()
 
 asset, period, sorting = st.columns(3)
 symbol = asset.selectbox("交易对", SYMBOLS)
 interval = period.selectbox("K 线周期", list(INTERVALS), index=1)
 sort = sorting.selectbox("市场列表排序", ("24h 成交额 USDT", "24h 涨跌 %"))
-params = input_parameters()
-with st.sidebar.expander("评分与计划"):
-    threshold = st.number_input("候选阈值", 1, 100, 65)
-    strong = st.number_input("强候选阈值", 1, 100, 80)
-    minimum_rr = st.number_input("最低目标盈亏比", 1.0, 10.0, 1.5, .1)
-with st.sidebar.expander("模拟回测资金与成本", expanded=True):
-    capital = st.number_input("模拟本金 USDT", 100., 1000000., 1000.)
-    risk = st.slider("单笔风险 %", .1, 2.0, .5, .1)
-    fee = st.number_input("单边手续费 %", 0., 1., .06, .01)
-    slip = st.number_input("单边滑点 %", 0., 1., .03, .01)
-
-if params.macd[0] >= params.macd[1] or threshold > strong:
-    st.error("MACD 快线周期须小于慢线，候选阈值须低于或等于强候选阈值。")
+strategy, params = spot_sidebar()
+problems = strategy.errors()
+if problems:
+    st.error("；".join(problems))
     st.stop()
 
-rules = Rules(threshold, strong, minimum_rr)
-costs = Costs(capital, risk / 100, fee / 100, slip / 100)
+rules = Rules(strategy.threshold, strategy.strong, strategy.minimum_rr)
+costs = Costs(strategy.capital, strategy.risk_pct / 100, strategy.fee_pct / 100, strategy.slip_pct / 100)
 quote_panel(symbol)
-market_workspace(symbol, interval, sort, params, rules, costs)
+market_workspace(symbol, interval, sort, params, rules, costs, strategy)
 with st.expander("策略回测与交易记录"):
-    backtest_panel(symbol, interval, params, rules, costs)
+    backtest_panel(symbol, interval, params, rules, costs, strategy)
 with st.expander("服务健康与模拟账户"):
     paper_panel()

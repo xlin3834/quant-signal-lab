@@ -14,8 +14,9 @@ from indicators import Parameters, calculate, warmup_bars
 from legacy import backtest as legacy_backtest
 from legacy import calc as legacy_calculate
 from market_data import INTERVALS, MarketDataError, closed_candles, fetch_candles, fetch_tickers, load_frames
+from mean_reversion import score_mean_reversion
 from paper import snapshot
-from signals import aligned_frames, score_frames
+from signals import WEIGHTS, aligned_frames, score_frames
 
 LOGGER = logging.getLogger(__name__)
 DIRECTION = {1: "多", -1: "空", 0: "中性"}
@@ -75,19 +76,24 @@ def market_list(sort):
         st.warning(str(exc))
 
 
-def signal_panel(last, costs, rules):
-    st.subheader("多周期信号")
+def signal_panel(last, costs, rules, model="趋势评分", weights=None):
+    st.subheader("多周期信号" if model != "均值回归" else "均值回归信号")
     st.caption(f"4小时 {DIRECTION.get(last.direction_4H, '缺失')} · "
                f"1小时 {DIRECTION.get(last.direction_1H, '缺失')} · 5分钟 RSI {last.rsi_5m:.1f}")
     st.write(f"做多 **{last.score_long}/100** · 做空 **{last.score_short}/100**")
-    st.caption("评分表示规则满足程度。15 分钟收盘触发。")
+    if model == "均值回归":
+        st.caption("回归条件只看 15 分钟已收盘的布林带和 RSI。上方周期只作背景，不参与这条规则。")
+    else:
+        st.caption("评分表示规则满足程度。15 分钟收盘触发。")
     st.caption(last.decision_time.strftime("%Y-%m-%d %H:%M UTC"))
     with st.expander("评分依据", expanded=True):
         st.write(f"做多 · {last.reasons_long or '无'}")
         st.write(f"做空 · {last.reasons_short or '无'}")
-        st.caption("趋势 30（4 小时与 1 小时同向） · 动量 20（RSI 与 MACD） · "
-                   "成交量 20（达到均量且 K 线同向） · 形态 15（收盘位置、短 EMA 与 5 分钟 RSI） · "
-                   "风险 15（ATR 占收盘价 0.1%–3%）")
+        if model == "均值回归":
+            st.caption("止损使用 ATR 倍数，两段目标使用布林中轨和外轨。模拟服务不使用这条规则。")
+        else:
+            shown = weights or WEIGHTS
+            st.caption(" · ".join(f"{name} {shown[name]}" for name in WEIGHTS))
     if not last.side:
         st.info(f"观望 · 需方向一致、评分达标且结构位盈亏比 ≥ {rules.minimum_rr:.2f}")
         return
@@ -102,14 +108,22 @@ def signal_panel(last, costs, rules):
 
 
 @st.fragment(run_every=45)
-def market_workspace(symbol, interval, sort, params, rules, costs):
+def market_workspace(symbol, interval, sort, params, rules, costs, strategy=None):
     try:
         now = pd.Timestamp.now(tz="UTC")
         frames = recent(symbol)
         # Validate cached entries on every request. Use a fresh clock after network calls.
         now = max(now, pd.Timestamp.now(tz="UTC"))
         frames = {key: closed_candles(value, key, now) for key, value in frames.items()}
-        ready = score_frames(aligned_frames(frames, params), rules, costs.fee, costs.slip)
+        aligned = aligned_frames(frames, params)
+        if strategy is not None and strategy.style == "mean_reversion":
+            ready = score_mean_reversion(aligned, rules, costs.fee, costs.slip, strategy)
+            model = "均值回归"
+            weight_map = None
+        else:
+            weight_map = None if strategy is None else dict(zip(WEIGHTS, strategy.weights))
+            ready = score_frames(aligned, rules, costs.fee, costs.slip, weight_map)
+            model = "趋势评分"
         chart = frames[interval] if interval in frames else closed_candles(chart_data(symbol, interval), interval)
         data = calculate(chart, params)
     except MarketDataError as exc:
@@ -143,12 +157,15 @@ def market_workspace(symbol, interval, sort, params, rules, costs):
                     st.dataframe(report, hide_index=True, width="stretch")
                     st.download_button("下载差异 CSV", report.to_csv(index=False), "differences.csv", "text/csv")
     with right:
-        signal_panel(last, costs, rules)
+        signal_panel(last, costs, rules, model, weight_map)
 
 
-def backtest_panel(symbol, interval, params, rules, costs):
+def backtest_panel(symbol, interval, params, rules, costs, strategy=None):
     st.subheader("历史模拟回测")
-    mode = st.radio("策略", ("多周期评分", "原版 EMA 交叉"), horizontal=True)
+    modes = ["多周期评分", "原版 EMA 交叉"]
+    if strategy is not None and strategy.style == "mean_reversion":
+        modes = ["均值回归（研究）", *modes]
+    mode = st.radio("策略", modes, horizontal=True)
     if mode == "原版 EMA 交叉":
         try:
             bars = closed_candles(chart_data(symbol, interval), interval).tail(199)
@@ -167,13 +184,24 @@ def backtest_panel(symbol, interval, params, rules, costs):
             st.download_button("导出原版交易记录 CSV", trades.to_csv(index=False), "legacy-trades.csv", "text/csv")
         return
     count = st.selectbox("15 分钟历史 K 线", (3000, 4000, 5000))
-    optimize = st.checkbox("仅在样本内比较候选评分阈值")
-    key = (symbol, count, params, rules, costs, optimize)
+    optimize = st.checkbox("仅在样本内比较候选评分阈值", disabled=mode == "均值回归（研究）")
+    if mode == "均值回归（研究）":
+        optimize = False
+        st.caption("均值回归不搜索评分阈值。样本仍按时间 70/30 切开，指标只用当时及以前的已收盘 K 线。")
+
+    def score_fn(frame, selected, fee, slip):
+        if mode == "均值回归（研究）":
+            return score_mean_reversion(frame, selected, fee, slip, strategy)
+        weights = None if strategy is None else dict(zip(WEIGHTS, strategy.weights))
+        return score_frames(frame, selected, fee, slip, weights)
+
+    key = (symbol, count, params, rules, costs, optimize, mode, strategy)
     if st.button("运行回测", type="primary"):
         st.session_state.pop("evaluation", None)
         try:
             with st.spinner("正在从 Bitget 分页加载历史 K 线并核对时间戳…"):
-                st.session_state.evaluation = (key, evaluate(history(symbol, count, params), costs, rules, optimize))
+                st.session_state.evaluation = (key, evaluate(
+                    history(symbol, count, params), costs, rules, optimize, score_fn))
         except MarketDataError as exc:
             LOGGER.warning("历史分页 %s: %s", symbol, exc)
             st.error(f"回测数据不可用。{exc}")

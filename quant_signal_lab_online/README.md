@@ -96,3 +96,16 @@ python verify_market.py --output /tmp/bitget-spot-differences.csv
 入口默认打开 Bitget USDT 永续，可随时切回原现货工作台。合约目录取自 Bitget 官方 `/api/v2/mix/market/contracts`，只显示状态正常、USDT 报价且支持 USDT 保证金的永续。目录缓存 60 秒，24 小时 REST 报价缓存 20 秒，工作台约每 30 秒更新。列表可搜索合约或基础币，按成交额、正涨幅、负跌幅或高低振幅排序，并按最低成交额和最大买卖价差筛选。报价缺失或过期的合约仍保留在目录，排行榜会排除相关快照。
 
 自选最多 50 个，通过当前网址的 `favorites` 参数保存。保存带参数的书签即可在刷新后恢复。列表同时显示资金费率、接收时间、行情时间和价差；价差以买卖中间价为分母。规格面板展示 Bitget 原始精度、步进、最小数量和最小名义额。P1 为只读，永续实时 K 线、候选信号与模拟交易留待后续阶段。完整验收记录见 [P1_REPORT.md](P1_REPORT.md)。
+
+## 研究平台
+
+页面顶部可以选择“研究平台”。它和现有永续、现货工作台放在一起，不替换原来的行情、评分、回测或模拟账户。研究记录使用另一个 SQLite 文件，默认是 `quant_signal_lab_online/data/research.sqlite3`，可以用 `QSL_RESEARCH_DB` 改位置。这个文件不要提交。
+
+```bash
+cd quant_signal_lab_online
+python -m unittest discover -q
+QSL_LIVE=1 python -m unittest test_platform_live.py
+streamlit run app.py
+```
+
+评审、接口边界和还没做的部分写在 [docs/全面评审与升级规划.md](../docs/全面评审与升级规划.md)。启动和证据等级见 [docs/平台运行说明.md](../docs/平台运行说明.md)。研究平台不下单，也不读取写入仓库的密钥。

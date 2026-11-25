@@ -51,8 +51,22 @@ def entry_terms(side, opening, stop, target, fee, slip):
     return entry, risk, reward
 
 
-def score_frames(base, rules=Rules(), fee=.0006, slip=.0003):
+def ordered_weights(weights=None):
+    """Keep the original five rules unless the caller supplies a complete replacement."""
+    if weights is None:
+        return WEIGHTS
+    if isinstance(weights, dict):
+        ordered = {key: int(weights[key]) for key in WEIGHTS}
+    else:
+        ordered = dict(zip(WEIGHTS, weights))
+    if len(ordered) != len(WEIGHTS) or any(value < 0 for value in ordered.values()) or sum(ordered.values()) != 100:
+        raise ValueError("评分权重必须覆盖五项、非负，且合计为 100")
+    return ordered
+
+
+def score_frames(base, rules=Rules(), fee=.0006, slip=.0003, weights=None):
     result = base.copy()
+    weights = ordered_weights(weights)
     complete = base[["ema7", "rsi", "macd_signal", "rsi_5m", "vol_avg", "atr"]].notna().all(axis=1)
     spread = (base.high - base.low).where(base.high > base.low)
     candle_location = (base.close - base.low) / spread
@@ -64,9 +78,9 @@ def score_frames(base, rules=Rules(), fee=.0006, slip=.0003):
                    & ((base.close - base.ema7) * side > 0) & ((base.rsi_5m - 50) * side > 0))
         volatility = (base.atr / base.close).between(.001, .03)
         checks = (structure, momentum, volume, pattern, volatility)
-        points = sum(check.astype(int) * weight for check, weight in zip(checks, WEIGHTS.values()))
+        points = sum(check.astype(int) * weight for check, weight in zip(checks, weights.values()))
         result[f"score_{suffix}"] = points
-        result[f"reasons_{suffix}"] = [", ".join(label for label, passed in zip(WEIGHTS, flags) if passed)
+        result[f"reasons_{suffix}"] = [", ".join(label for label, passed in zip(weights, flags) if passed)
                                       for flags in zip(*checks)]
         stop = base.swing_low if side == 1 else base.swing_high
         target = base.resistance if side == 1 else base.support

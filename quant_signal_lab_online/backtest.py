@@ -97,14 +97,15 @@ def simulate(scored, costs=Costs(), minimum_rr=1.5):
     return statistics, curve, pd.DataFrame(trades, columns=TRADE_COLUMNS)
 
 
-def evaluate(base, costs, rules, optimize=False):
+def evaluate(base, costs, rules, optimize=False, score_fn=None):
+    score_fn = score_frames if score_fn is None else score_fn
     split = int(len(base) * .7)
     training, test = base.iloc[:split], base.iloc[split:]
     candidates = (55, 60, 65, 70, 75, 80) if optimize else (rules.threshold,)
     runs = {}
     for threshold in candidates:
         selected = Rules(threshold, rules.strong, rules.minimum_rr)
-        runs[threshold] = simulate(score_frames(training, selected, costs.fee, costs.slip), costs, rules.minimum_rr)
+        runs[threshold] = simulate(score_fn(training, selected, costs.fee, costs.slip), costs, rules.minimum_rr)
     threshold = max(candidates, key=lambda t: (runs[t][0]["净收益 USDT"], -abs(t - rules.threshold)))
     selected = Rules(threshold, rules.strong, rules.minimum_rr)
-    return threshold, runs[threshold], simulate(score_frames(test, selected, costs.fee, costs.slip), costs, rules.minimum_rr)
+    return threshold, runs[threshold], simulate(score_fn(test, selected, costs.fee, costs.slip), costs, rules.minimum_rr)
