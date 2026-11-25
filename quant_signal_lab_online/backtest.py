@@ -64,6 +64,17 @@ def mark(position, close, equity, costs):
     return equity + _close(position, close, position["units"], None, "", costs)["pnl"]
 
 
+def _loss_streak(outcomes):
+    streak = longest = 0
+    for value in outcomes:
+        if value < 0:
+            streak += 1
+            longest = max(longest, streak)
+        else:
+            streak = 0
+    return longest
+
+
 def simulate(scored, costs=Costs(), minimum_rr=1.5):
     equity, position, pending = costs.capital, None, None
     curve, trades, outcomes = [], [], []
@@ -89,11 +100,17 @@ def simulate(scored, costs=Costs(), minimum_rr=1.5):
     drawdown = curve.equity / curve.equity.cummax().clip(lower=costs.capital) - 1
     wins = [value for value in outcomes if value > 0]
     losses = [value for value in outcomes if value < 0]
+    gross_loss = -sum(losses)
+    # 盈利因子 uses closed-position quote PnL. A zero-loss sample stays blank rather than infinite.
     statistics = {"净收益 USDT": float(curve.equity.iloc[-1] - costs.capital),
                   "最大回撤 %": float(drawdown.min() * 100),
                   "交易次数": len(outcomes),
                   "胜率 %": 100 * len(wins) / len(outcomes) if outcomes else None,
-                  "平均盈亏比": (sum(wins) / len(wins)) / (-sum(losses) / len(losses)) if wins and losses else None}
+                  "平均盈亏比": (sum(wins) / len(wins)) / (-sum(losses) / len(losses)) if wins and losses else None,
+                  "盈利因子": (sum(wins) / gross_loss) if gross_loss else None,
+                  "平均每笔盈亏 USDT": (sum(outcomes) / len(outcomes)) if outcomes else None,
+                  "最大连续亏损次数": _loss_streak(outcomes),
+                  "收盘持仓占比 %": float((curve["units"] != 0).mean() * 100)}
     return statistics, curve, pd.DataFrame(trades, columns=TRADE_COLUMNS)
 
 

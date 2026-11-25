@@ -25,9 +25,19 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def connect(path):
+    conn = sqlite3.connect(path, timeout=10)
+    conn.execute("PRAGMA busy_timeout=10000")
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.Error:
+        LOGGER.warning("SQLite WAL 不可用", exc_info=True)
+    return conn
+
+
 @contextmanager
 def transaction(path):
-    conn = sqlite3.connect(path, timeout=10)
+    conn = connect(path)
     try:
         with conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -67,8 +77,17 @@ def control(path, action):
         save_account(conn, state)
 
 
+def record_failure(path, exc):
+    """Remember the poll error without dropping a plan, position, or saved progress."""
+    with transaction(path) as conn:
+        state = read_account(conn)
+        state.update(heartbeat=utc_now(), error=str(exc)[:500])
+        save_account(conn, state)
+    return state
+
+
 def snapshot(path):
-    with closing(sqlite3.connect(path, timeout=5)) as conn:
+    with closing(connect(path)) as conn:
         if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='account'").fetchone():
             return None, [], []
         conn.execute("BEGIN")
@@ -171,10 +190,10 @@ def main():
                 tick(args.db, args.symbol)
             except Exception as exc:
                 LOGGER.exception("模拟服务异常")
-                with transaction(args.db) as conn:
-                    state = read_account(conn)
-                    state.update(heartbeat=utc_now(), error=str(exc), pending=None)
-                    save_account(conn, state)
+                try:
+                    record_failure(args.db, exc)
+                except Exception:
+                    LOGGER.exception("无法记录模拟服务异常")
             time.sleep(30)
 
 

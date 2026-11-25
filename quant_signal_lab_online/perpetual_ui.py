@@ -1,15 +1,70 @@
-"""P1 read-only perpetual market workbench."""
+"""Read-only perpetual market workbench."""
 import logging
 import time
 
 import pandas as pd
 import streamlit as st
 
-from market_data import MarketDataError
-from perpetual_market import VIEWS, build_rows, load_directory, load_tickers, read_favorites, visible_rows
+from charts import market_figure
+from indicators import Parameters, calculate
+from market_data import INTERVALS, MarketDataError, active_forming, capture_forming, closed_candles
+from perpetual_market import (VIEWS, build_rows, fetch_candles, load_directory, load_tickers, number,
+                             read_favorites, visible_rows)
+from ui import layer_picker
 
 LOG = logging.getLogger(__name__)
 PAGE_SIZE = 50
+CHART_INTERVALS = ("15m", "5m", "1H", "4H", "1D")
+
+
+def show_number(value, spec=",.6g"):
+    parsed = number(value)
+    return "—" if parsed is None else format(parsed, spec)
+
+
+@st.cache_data(ttl=40, max_entries=16, show_spinner="正在读取永续 K 线…")
+def contract_candles(symbol, interval):
+    raw = fetch_candles(symbol, interval)
+    observed = pd.Timestamp.now(tz="UTC")
+    closed = closed_candles(raw, interval, observed, min_bars=30)
+    return closed, capture_forming(raw, interval, observed, closed)
+
+
+def research_panel(symbol, row):
+    st.markdown(f"**{symbol} 研究 K 线**")
+    st.caption("最新价 K 线，不是标记价或指数价。未收盘 K 线不进入指标。本图不是交易信号，"
+               "也不包含资金费或滑点。图中指标使用默认参数，只供观察。")
+    if row["state"] != "正常":
+        st.caption(f"报价状态：{row['state']}。标记价、指数价和基差不参与排行。")
+    mark, index, basis, holding = st.columns(4)
+    mark.metric("标记价", show_number(row["mark"]))
+    index.metric("指数价", show_number(row["index"]))
+    basis.metric("基差 %", show_number(row["basis"], ".3f"), help="（最新价 − 指数价）÷ 指数价 × 100")
+    unit = row["base"] or "基础币"
+    holding.metric("持仓量", show_number(row["holding"], ",.4f"), help=f"单位 {unit}，取自交易所当前持仓量")
+    interval = st.selectbox("研究 K 线周期", CHART_INTERVALS, key="perp_interval")
+    try:
+        closed, captured = contract_candles(symbol, interval)
+        now = pd.Timestamp.now(tz="UTC")
+        closed = closed_candles(closed, interval, now, min_bars=30)
+        forming = active_forming(captured, interval, now, closed.time.iloc[-1])
+        data = calculate(closed)
+    except MarketDataError as exc:
+        LOG.warning("Perpetual candles %s %s: %s", symbol, interval, exc)
+        st.warning(f"永续 K 线暂不可用：{exc}")
+        return
+    duration = INTERVALS[interval][1]
+    st.caption(f"最近已收盘 {(data.time.iloc[-1] + duration):%Y-%m-%d %H:%M} UTC · "
+               f"收盘 {data.close.iloc[-1]:,.5g}")
+    if forming is not None:
+        opened = pd.Timestamp(forming["time"])
+        st.caption(f"未收盘 K 线 {opened:%Y-%m-%d %H:%M} UTC 开盘 · 最新价 {forming['close']:,.5g}")
+    show = layer_picker("perp_layers")
+    st.plotly_chart(market_figure(data.tail(250), Parameters(), forming=forming, show=show),
+                    width="stretch", config={"displaylogo": False, "responsive": True, "scrollZoom": True})
+    export = data.drop(columns=["signal"], errors="ignore").assign(close_time=data.time + duration)
+    st.download_button("导出已收盘 K 线 CSV", export.to_csv(index=False), f"{symbol}-{interval}-closed.csv",
+                       "text/csv", key=f"perp_csv_{symbol}_{interval}", help="只含已收盘 K 线。")
 
 
 @st.cache_data(ttl=60, max_entries=1, show_spinner=False)
@@ -106,3 +161,4 @@ def perpetual_workspace():
                   "资金费间隔（小时）": "fundInterval", "交易所最大杠杆（仅规格）": "maxLever"}
         st.dataframe(pd.DataFrame([{"规格": label, "数值": str(spec.get(key) or "—")}
                                   for label, key in fields.items()]), hide_index=True, width="stretch")
+    research_panel(selected, next(item for item in subset if item["symbol"] == selected))

@@ -1,12 +1,15 @@
-"""Public Bitget USDT perpetual contract directory and snapshot rankings."""
+"""Public Bitget USDT perpetual directory, snapshots, and last-price candles."""
 import math
 import re
 import time
 
-from market_data import MarketDataError, request_data
+from market_data import MarketDataError, parse_candles, request_data
 
 ROOT = "https://api.bitget.com/api/v2/mix/market"
 PARAMS = {"productType": "USDT-FUTURES"}
+# Spot research intervals, with the granularity strings this contract endpoint expects.
+PERP_INTERVALS = {"5m": "5m", "15m": "15m", "1H": "1H", "4H": "4H", "1D": "1D"}
+CANDLE_LIMIT = 1000
 MAX_QUOTE_AGE = 90_000
 SYMBOL = re.compile(r"[A-Z0-9._-]{1,32}")
 VIEWS = ("全部合约", "成交额排行", "涨幅榜", "跌幅榜", "波动率排行", "我的自选")
@@ -41,6 +44,23 @@ def load_directory():
             if SYMBOL.fullmatch(str(row.get("symbol", ""))) and is_active(row)}
 
 
+def fetch_candles(symbol, interval, limit=CANDLE_LIMIT):
+    """Last-price candles. Drop the still-forming bar before any indicator calculation."""
+    if interval not in PERP_INTERVALS:
+        raise MarketDataError("不支持的永续 K 线周期")
+    if not SYMBOL.fullmatch(str(symbol)):
+        raise MarketDataError("合约代码无效")
+    try:
+        size = int(limit)
+    except (TypeError, ValueError):
+        raise MarketDataError("K 线数量无效") from None
+    rows = request_data(f"{ROOT}/candles", {
+        "symbol": symbol, "productType": PARAMS["productType"], "granularity": PERP_INTERVALS[interval],
+        "kLineType": "market", "limit": str(max(1, min(size, CANDLE_LIMIT))),
+    })
+    return parse_candles(rows)
+
+
 def load_tickers():
     ticks = request_data(f"{ROOT}/tickers", PARAMS)
     if not isinstance(ticks, list) or not all(isinstance(row, dict) for row in ticks):
@@ -57,18 +77,24 @@ def build_rows(directory, tickers):
     rows = []
     for symbol, spec in directory.items():
         stamp, tick = lookup.get(symbol, (None, {}))
-        price, turnover, change, funding, high, low, bid, ask = (
+        price, turnover, change, funding, high, low, bid, ask, mark, index, holding = (
             number(tick.get(field)) for field in (
-                "lastPr", "usdtVolume", "change24h", "fundingRate", "high24h", "low24h", "bidPr", "askPr")
+                "lastPr", "usdtVolume", "change24h", "fundingRate", "high24h", "low24h", "bidPr", "askPr",
+                "markPrice", "indexPrice", "holdingAmount")
         )
+        price = price if price is not None and price > 0 else None
+        mark = mark if mark is not None and mark > 0 else None
+        index = index if index is not None and index > 0 else None
         rows.append(dict(
-            symbol=symbol, base=spec.get("baseCoin"), spec=spec, timestamp=stamp,
-            price=price if price is not None and price > 0 else None,
+            symbol=symbol, base=spec.get("baseCoin"), spec=spec, timestamp=stamp, price=price,
             turnover=turnover if turnover is not None and turnover >= 0 else None,
             change=None if change is None else change * 100,
             funding=None if funding is None else funding * 100,
             range_pct=100 * (high / low - 1) if high is not None and low is not None and high >= low > 0 else None,
             spread_pct=200 * (ask - bid) / (ask + bid) if ask is not None and bid is not None and ask >= bid > 0 else None,
+            mark=mark, index=index,
+            basis=100 * (price - index) / index if price is not None and index is not None else None,
+            holding=holding if holding is not None and holding >= 0 else None,
         ))
     return rows
 
@@ -88,7 +114,9 @@ def visible_rows(rows, query, view, favorites, now, min_turnover=0, max_spread=0
     ranks = {"成交额排行": "turnover", "涨幅榜": "change", "跌幅榜": "change", "波动率排行": "range_pct"}
     ranking = ranks.get(view)
     for row in rows:
-        if query not in row["symbol"] and query not in (row["base"] or ""):
+        symbol = str(row["symbol"]).upper()
+        base = (row["base"] or "").upper()
+        if query not in symbol and query not in base:
             continue
         if view == "我的自选" and row["symbol"] not in favorites:
             continue
@@ -111,4 +139,12 @@ def visible_rows(rows, query, view, favorites, now, min_turnover=0, max_spread=0
 
 
 def read_favorites(value):
-    return tuple(dict.fromkeys(symbol for symbol in value.split(",") if SYMBOL.fullmatch(symbol)))[:50]
+    if value is None:
+        return ()
+    if not isinstance(value, str):
+        try:
+            value = ",".join(str(part) for part in value)
+        except TypeError:
+            return ()
+    symbols = (part.strip().upper() for part in value.split(","))
+    return tuple(dict.fromkeys(symbol for symbol in symbols if SYMBOL.fullmatch(symbol)))[:50]
