@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+quant_signal_lab_online/data/
+*.sqlite3
