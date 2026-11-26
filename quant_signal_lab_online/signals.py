@@ -15,6 +15,11 @@ class Rules:
     threshold: int = 65
     strong: int = 80
     minimum_rr: float = 1.5
+    early: int = 65
+    rvol: float = 1.0
+    atr_stop: float = 1.5
+    weights: tuple = (30, 20, 20, 15, 15)
+    extreme_atr: float = 0.04
 
 
 def aligned_frames(frames, params=Parameters()):
@@ -94,3 +99,42 @@ def make_plan(row):
     suffix = "long" if side == 1 else "short"
     return {"side": side, "stop": float(row[f"stop_{suffix}"]),
             "target1": float(row[f"target1_{suffix}"]), "target2": float(row[f"target2_{suffix}"])}
+
+
+def score_with_config(base, rules=Rules(), fee=.0006, slip=.0003, market_ok=True, range_mode=False):
+    """Preset-aware scoring. Official candidates stay close-confirmed; stale markets pause them."""
+    result = score_frames(base, rules, fee, slip)
+    rvol = (base.volume / base.vol_avg.replace(0, np.nan))
+    result["rvol"] = rvol
+    result["atr_pct"] = base.atr / base.close
+    extreme = result["atr_pct"] >= rules.extreme_atr
+    result["early_long"] = market_ok & ~extreme & (result.score_long >= rules.early)
+    result["early_short"] = market_ok & ~extreme & (result.score_short >= rules.early)
+    if range_mode:
+        mid = base.boll_mid
+        width = (base.boll_up - base.boll_low) / mid.replace(0, np.nan)
+        slope = base.ema20 - base.ema20.shift(3)
+        result["boll_width"] = width
+        result["ema_slope"] = slope
+        stretched = width > width.rolling(50, min_periods=10).median() * 1.8
+        trending = (base.direction_1H == base.direction_4H) & (base.direction_1H != 0) & stretched
+        result["range_invalid"] = trending.fillna(False)
+        # Do not issue official counter-trend candidates when the range regime has failed.
+        result.loc[result.range_invalid & (result.side == result.direction_1H), ["valid_long", "valid_short"]] = False
+        result["side"] = np.select([result.valid_long, result.valid_short], [1, -1], default=0)
+    if not market_ok or extreme.any():
+        paused = (not market_ok) | extreme
+        result.loc[paused, ["valid_long", "valid_short", "side"]] = [False, False, 0]
+        result.loc[paused, "grade"] = "暂停正式候选"
+    result["alert"] = np.select(
+        [result.early_long & (result.side != 1), result.early_short & (result.side != -1)],
+        ["临时预警·多", "临时预警·空"], default="",
+    )
+    result["grade"] = np.select(
+        [result.valid_long & (result.score_long >= rules.strong),
+         result.valid_short & (result.score_short >= rules.strong), result.side != 0],
+        ["强候选", "强候选", "普通候选"], default=result.grade,
+    )
+    if not market_ok:
+        result.loc[:, "grade"] = "数据过期，已暂停生成新的正式交易候选"
+    return result

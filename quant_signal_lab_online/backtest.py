@@ -2,6 +2,7 @@
 from dataclasses import dataclass
 import math
 
+import numpy as np
 import pandas as pd
 
 from signals import Rules, entry_terms, score_frames
@@ -64,28 +65,50 @@ def mark(position, close, equity, costs):
     return equity + _close(position, close, position["units"], None, "", costs)["pnl"]
 
 
-def simulate(scored, costs=Costs(), minimum_rr=1.5):
+def simulate(scored, costs=Costs(), minimum_rr=1.5, detail=False):
     equity, position, pending = costs.capital, None, None
-    curve, trades, outcomes = [], [], []
+    curve, trades, outcomes, holds = [], [], [], []
+    cancelled = 0
+    official = int(((pd.to_numeric(scored.side, errors="coerce") == 1) | (pd.to_numeric(scored.side, errors="coerce") == -1)).sum()) if len(scored) else 0
     for bar in scored.itertuples(index=False):
         if position is None and pending is not None:
-            position = new_position(pending, bar.open, equity, costs, minimum_rr)
+            opened = new_position(pending, bar.open, equity, costs, minimum_rr)
+            if opened is None:
+                cancelled += 1
+            else:
+                opened["entry_time"] = bar.time
+            position = opened
         if position is not None:
             prior = position["realized"]
-            fills, position = process_bar(position, bar, costs)
+            fills, leftover = process_bar(position, bar, costs)
             net = sum(fill["pnl"] for fill in fills)
             equity += net
+            for fill in fills:
+                fill["entry_time"] = position["entry_time"]
             trades.extend(fills)
+            position = leftover
             if position is None:
                 outcomes.append(prior + net)
+                holds.append(bar.time - fills[-1]["entry_time"] if fills else pd.Timedelta(0))
         curve.append({"time": bar.time, "equity": mark(position, bar.close, equity, costs),
                       "units": 0.0 if position is None else position["units"] * position["side"]})
         pending = None
-        if position is None and bar.side:
-            suffix = "long" if bar.side == 1 else "short"
-            pending = {"side": int(bar.side), "stop": getattr(bar, f"stop_{suffix}"),
+        side = bar.side
+        if side is None or not np.isfinite(side):
+            side = 0
+        else:
+            side = int(side)
+        if position is None and side:
+            suffix = "long" if side == 1 else "short"
+            pending = {"side": side, "stop": getattr(bar, f"stop_{suffix}"),
                        "target1": getattr(bar, f"target1_{suffix}"), "target2": getattr(bar, f"target2_{suffix}")}
     curve = pd.DataFrame(curve)
+    if curve.empty:
+        statistics = {"净收益 USDT": 0.0, "最大回撤 %": 0.0, "交易次数": 0, "胜率 %": None, "平均盈亏比": None}
+        extra = {"官方信号数": official, "取消次数": cancelled, "期望收益 USDT": None,
+                 "假信号比例 %": None, "平均持仓": None, "outcomes": outcomes}
+        trades = pd.DataFrame(trades, columns=TRADE_COLUMNS + (["entry_time"] if detail else []))
+        return (statistics, curve, trades, extra) if detail else (statistics, curve, pd.DataFrame(trades, columns=TRADE_COLUMNS))
     drawdown = curve.equity / curve.equity.cummax().clip(lower=costs.capital) - 1
     wins = [value for value in outcomes if value > 0]
     losses = [value for value in outcomes if value < 0]
@@ -94,7 +117,20 @@ def simulate(scored, costs=Costs(), minimum_rr=1.5):
                   "交易次数": len(outcomes),
                   "胜率 %": 100 * len(wins) / len(outcomes) if outcomes else None,
                   "平均盈亏比": (sum(wins) / len(wins)) / (-sum(losses) / len(losses)) if wins and losses else None}
-    return statistics, curve, pd.DataFrame(trades, columns=TRADE_COLUMNS)
+    if not detail:
+        return statistics, curve, pd.DataFrame(trades, columns=TRADE_COLUMNS)
+    attempted = cancelled + len(outcomes)
+    false_ratio = 100 * (cancelled + len(losses)) / attempted if attempted else None
+    avg_hold = (sum(holds, pd.Timedelta(0)) / len(holds)) if holds else None
+    extra = {"官方信号数": official, "取消次数": cancelled,
+             "期望收益 USDT": (sum(outcomes) / len(outcomes)) if outcomes else None,
+             "假信号比例 %": false_ratio,
+             "平均持仓": avg_hold, "outcomes": outcomes, "holds": holds}
+    columns = TRADE_COLUMNS + ["entry_time"]
+    table = pd.DataFrame(trades)
+    if not table.empty:
+        table = table.reindex(columns=[col for col in columns if col in table.columns])
+    return statistics, curve, table, extra
 
 
 def evaluate(base, costs, rules, optimize=False):

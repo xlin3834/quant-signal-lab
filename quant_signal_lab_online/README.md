@@ -1,10 +1,12 @@
-# Quant Signal Lab 4.0
+# Quant Signal Lab
 
-Streamlit 中文市场工作台。Bitget 公开现货行情覆盖 BTCUSDT、ETHUSDT、SOLUSDT。指标、历史回测和后台账户都用于研究与模拟，无 API 密钥或下单接口。
+公开网站请看仓库根目录 README，用 `python -m workbench` 启动。不要把这个分支部署到现有的 Streamlit 生产应用 `https://aether-quant-lab.streamlit.app/`。那个站点应继续使用 `main` 上的 `quant_signal_lab_online/app.py`。
+
+下面保留原来的 Streamlit 研究入口，供本地对照。它不是这次要公开分享的工作台。
 
 ## Streamlit Community Cloud
 
-现有应用保持原仓库、原 `main` 分支与入口 `quant_signal_lab_online/app.py`，更新同一应用即可继续使用原网址。依赖位于入口旁的 `requirements.txt`，主题配置位于仓库根目录。若出现 Bitget 网络或数据异常，页面会提示并停止生成信号。
+现有生产应用保持 `main` 分支和入口 `quant_signal_lab_online/app.py`。不要把本功能分支选成它的部署来源。依赖位于入口旁的 `requirements.txt`。若出现 Bitget 网络或数据异常，页面会提示并停止生成信号。
 
 本地从仓库根目录启动：
 
@@ -96,3 +98,27 @@ python verify_market.py --output /tmp/bitget-spot-differences.csv
 入口默认打开 Bitget USDT 永续，可随时切回原现货工作台。合约目录取自 Bitget 官方 `/api/v2/mix/market/contracts`，只显示状态正常、USDT 报价且支持 USDT 保证金的永续。目录缓存 60 秒，24 小时 REST 报价缓存 20 秒，工作台约每 30 秒更新。列表可搜索合约或基础币，按成交额、正涨幅、负跌幅或高低振幅排序，并按最低成交额和最大买卖价差筛选。报价缺失或过期的合约仍保留在目录，排行榜会排除相关快照。
 
 自选最多 50 个，通过当前网址的 `favorites` 参数保存。保存带参数的书签即可在刷新后恢复。列表同时显示资金费率、接收时间、行情时间和价差；价差以买卖中间价为分母。规格面板展示 Bitget 原始精度、步进、最小数量和最小名义额。P1 为只读，永续实时 K 线、候选信号与模拟交易留待后续阶段。完整验收记录见 [P1_REPORT.md](P1_REPORT.md)。
+
+## 实时 USDT 永续行情与策略预设（开发分支）
+
+默认首页继续打开 Bitget USDT 永续工作台。BTCUSDT、ETHUSDT 使用官方 `USDT-FUTURES` WebSocket 作为主行情源（ticker 含最新成交与买卖报价，K 线增量更新，心跳与指数退避重连，REST 仅用于历史初始化和断线补全）。现货工作台仍可切换，且必须单独标注，禁止把现货 K 线静默当成永续。
+
+本地可在进程内启动实时缓存，核心报价区约每 0.4 秒增量刷新，不整页重载：
+
+```bash
+cd quant_signal_lab_online
+python measure_realtime.py
+streamlit run app.py
+```
+
+也可独立运行只读网关：
+
+```bash
+python realtime_engine.py --host 127.0.0.1 --port 8766
+```
+
+该接口为 Bitget 公开行情，无需交易密钥，也没有下单或付费订阅。五种策略预设和五个原有参数模块已接入计算引擎；内置数值只是初始测试配置，不得称为最优，也不会在启动时覆盖已保存的自定义配置。正式交易候选在行情过期或断线时暂停。
+
+五种预设已在同一段 Bitget USDT 永续历史上做对比回测（见 `PRESET_COMPARISON.md`，可用 `python preset_backtest.py` 复现）。内置参数只是初始测试值，没有寻优，不得称为最优。宏观周期（日/周趋势阶段，月/季/年周期位置）与斐波那契回撤/延伸已按独立参数计算，只建议、不自动切换预设，也不替代五个原有参数模块。
+
+尚未完成：NVDA / 黄金数据源、跨市场与经济日历、云端后台通知验收，以及生产部署。

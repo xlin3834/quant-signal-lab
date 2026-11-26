@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#071018">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="信号实验室">
+  <title>信号实验室 · 趋势判断工作台</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/static/manifest.webmanifest">
+  <link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand">
+        <span class="mark" aria-hidden="true"></span>
+        <strong>SIGNALLAB</strong>
+      </div>
+      <button class="side-active" type="button" data-go="overview">市场工作台</button>
+      <p class="side-label">关注市场</p>
+      <div id="watch" class="watch"></div>
+      <p class="creed">独立思考，理性交易<br>指标辅助判断，不预测未来。</p>
+    </aside>
+    <div class="workspace">
+      <header class="top">
+        <div>
+          <p class="kicker">信号实验室 / MARKET TERMINAL</p>
+          <h1>市场工作台</h1>
+          <p class="sub">行情、分析与风险管理，在一个工作台切换</p>
+        </div>
+        <button id="refresh" class="ghost" type="button">更新当前工具</button>
+      </header>
+      <div class="nav-card">
+        <p id="context" class="context">Bitget · 核心资产</p>
+        <nav id="tabs" class="tabs" aria-label="工作台分页"></nav>
+        <p id="badge" class="badge delay">Bitget价格流 · 连接中</p>
+      </div>
+      <section id="view" class="view" aria-live="polite"></section>
+      <footer class="foot">
+        <span>信号实验室</span>
+        <span>公开行情 · 本地计算指标 · 仅供研究参考</span>
+      </footer>
+    </div>
+  </div>
+  <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

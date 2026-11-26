@@ -14,6 +14,7 @@ class Parameters:
     atr: int = 14
     volume: int = 20
     structure: int = 20
+    boll_mult: float = 2.0
 
 
 def warmup_bars(p):
@@ -46,7 +47,7 @@ def calculate(data, p=Parameters()):
     down = _exponential(-delta.clip(upper=0), 1 / p.rsi, 4 * p.rsi)
     d["rsi"] = (100 * up / (up + down)).mask((up == 0) & (down == 0), 50)
     d["boll_mid"] = close.rolling(p.boll).mean()
-    spread = 2 * close.rolling(p.boll).std()
+    spread = p.boll_mult * close.rolling(p.boll).std()
     d["boll_up"], d["boll_low"] = d.boll_mid + spread, d.boll_mid - spread
     fast, slow, signal = p.macd
     d["macd"] = _ema(close, fast) - _ema(close, slow)
