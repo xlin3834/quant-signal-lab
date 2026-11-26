@@ -11,6 +11,7 @@ os.environ.setdefault("QSL_DISABLE_FEED", "1")
 
 from fastapi.testclient import TestClient
 
+from workbench.__main__ import bind_address
 from workbench.catalog import (
     badge_for,
     classify_contract,
@@ -39,6 +40,15 @@ def sample_row(symbol, base, rwa, price=10, freshness="快照"):
         "symbol": symbol, "base": base, "price": price, "turnover": 1000, "change": 1,
         "freshness": freshness, "timestamp": 1, **meta,
     }
+
+
+class BindTests(unittest.TestCase):
+    def test_port_env_and_default_interface(self):
+        self.assertEqual(bind_address(environ={}), ("0.0.0.0", 8787))
+        self.assertEqual(bind_address(environ={"PORT": "10000"}), ("0.0.0.0", 10000))
+        self.assertEqual(bind_address(port_arg=9000, environ={"PORT": "10000"}), ("0.0.0.0", 9000))
+        with self.assertRaises(ValueError):
+            bind_address(environ={"PORT": "0"})
 
 
 class CatalogTests(unittest.TestCase):

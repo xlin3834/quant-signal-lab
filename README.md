@@ -13,7 +13,7 @@ pip install -r workbench/requirements.txt
 python -m workbench
 ```
 
-浏览器打开 http://127.0.0.1:8787 。只想给本机看时保持默认的 `127.0.0.1`。需要在另一台机器访问时，明确加上 `--host 0.0.0.0`。
+浏览器打开 http://127.0.0.1:8787 。进程默认监听 `0.0.0.0`。如果环境变量 `PORT` 有值就用它，否则用 8787。显式传入 `--port` 时以命令行为准。
 
 引擎自测（不启动网页）：
 
@@ -50,18 +50,20 @@ cd quant_signal_lab_online && python -m unittest
 
 ## 单独部署，且不替换现有 Streamlit
 
-把本分支部署成一个新进程即可，例如：
+这是一个新网站，不是现有 Streamlit 应用的更新。不要把 [https://aether-quant-lab.streamlit.app/](https://aether-quant-lab.streamlit.app/) 的仓库、分支或入口改到本分支。那个站点继续使用 GitHub `main` 的 `quant_signal_lab_online/app.py`。
+
+仓库根目录的 `render.yaml` 只描述一个新的 Docker Web 服务：用本分支 `cursor/signal-lab-workbench-1d62` 构建 `workbench/Dockerfile`，构建上下文是仓库根目录。平台会注入 `PORT`，容器监听 `0.0.0.0:$PORT`。应用蓝图之后，新网址由托管商分配，名称对应 `https://signal-lab-workbench.onrender.com`。这里没有创建该服务，也没有购买套餐。
+
+本地或任意能跑 Docker 的新主机：
 
 ```bash
 pip install -r workbench/requirements.txt
-python -m workbench --host 0.0.0.0 --port 8787
+python -m workbench
 ```
-
-或在仓库根目录构建另一份镜像，不要替换 `quant_signal_lab_online/Dockerfile`：
 
 ```bash
 docker build -f workbench/Dockerfile -t signal-lab-workbench .
-docker run --rm -p 8787:8787 signal-lab-workbench
+docker run --rm -e PORT=8787 -p 8787:8787 signal-lab-workbench
 ```
 
-没有在不合并 `main`、不购买托管的前提下提供长期公开网址。不要把 Streamlit Community Cloud 上的现有应用改到这个分支。
+不要改 `quant_signal_lab_online/Dockerfile`，那份镜像仍是 Streamlit。
