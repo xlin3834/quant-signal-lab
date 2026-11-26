@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 import requests
 
+from workbench.honesty import GATE_NOTE, LATENCY_NOTE, WEIGHTS_NOTE
 from workbench.catalog import (
     badge_for,
     classify_contract,
@@ -212,54 +213,71 @@ def live_quotes():
     return payload
 
 
+def _live_asset(asset_id, name, symbol, quote):
+    freshness = None if quote is None else quote.get("freshness")
+    origin = None if quote is None else quote.get("origin")
+    if freshness == "实时" and origin == "WebSocket":
+        connection = "已连接"
+    elif freshness in {"延迟", "快照"}:
+        connection = "已连接但不是实时流"
+    else:
+        connection = "未保持实时连接"
+    return {
+        "id": asset_id,
+        "name": name,
+        "symbol": symbol,
+        "product_class": "crypto_perp",
+        "product_label": "Bitget USDT 本位永续",
+        "connected": True,
+        "quote": quote,
+        "reason": None,
+        "source": f"Bitget 官方 USDT 本位永续 · {origin or '无来源'}",
+        "updated_at": None if quote is None else quote.get("exchange_time"),
+        "connection": connection,
+        "freshness_label": freshness or "无行情",
+        "not_substitute": "这是 USDT 本位永续，不是现货。",
+        "latency_note": LATENCY_NOTE,
+    }
+
+
+def _closed_asset(asset_id, name, symbol, product_class, product_label, reason, not_substitute):
+    return {
+        "id": asset_id,
+        "name": name,
+        "symbol": symbol,
+        "product_class": product_class,
+        "product_label": product_label,
+        "connected": False,
+        "quote": None,
+        "reason": reason,
+        "source": "未接通",
+        "updated_at": None,
+        "connection": "未连接",
+        "freshness_label": "无行情",
+        "not_substitute": not_substitute,
+        "latency_note": LATENCY_NOTE,
+    }
+
+
 def core_assets(quotes=None):
     quotes = quotes or live_quotes()
     symbols = quotes["symbols"]
     return {
         "assets": [
-            {
-                "id": "BTC",
-                "name": "比特币",
-                "symbol": "BTCUSDT",
-                "product_class": "crypto_perp",
-                "product_label": "Bitget USDT 本位永续",
-                "connected": True,
-                "quote": symbols.get("BTCUSDT"),
-                "reason": None,
-            },
-            {
-                "id": "ETH",
-                "name": "以太坊",
-                "symbol": "ETHUSDT",
-                "product_class": "crypto_perp",
-                "product_label": "Bitget USDT 本位永续",
-                "connected": True,
-                "quote": symbols.get("ETHUSDT"),
-                "reason": None,
-            },
-            {
-                "id": "NVDA",
-                "name": "英伟达",
-                "symbol": "NVDA",
-                "product_class": "cash_equity",
-                "product_label": "美股正股",
-                "connected": False,
-                "quote": None,
-                "reason": BLOCKED["NVDA"],
-            },
-            {
-                "id": "XAU",
-                "name": "现货黄金",
-                "symbol": "XAU/USD",
-                "product_class": "spot_gold",
-                "product_label": "现货黄金 XAU/USD",
-                "connected": False,
-                "quote": None,
-                "reason": BLOCKED["XAUUSD"],
-            },
+            _live_asset("BTC", "比特币", "BTCUSDT", symbols.get("BTCUSDT")),
+            _live_asset("ETH", "以太坊", "ETHUSDT", symbols.get("ETHUSDT")),
+            _closed_asset(
+                "NVDA", "英伟达", "NVDA", "cash_equity", "美股正股", BLOCKED["NVDA"],
+                "NVDAUSDT 是代币化股票永续，不能代替这只正股，这里也不引用它的价格。",
+            ),
+            _closed_asset(
+                "XAU", "现货黄金", "XAU/USD", "spot_gold", "现货黄金 XAU/USD", BLOCKED["XAUUSD"],
+                "XAUUSDT、XAUTUSDT、PAXGUSDT 是不同产品，不能代替 XAU/USD 现货，这里也不引用它们的价格。",
+            ),
         ],
         "badge": quotes["badge"],
         "server_ms": quotes["server_ms"],
+        "latency_note": LATENCY_NOTE,
     }
 
 
@@ -280,6 +298,9 @@ def _present_directory_row(row, now):
         "quote_state": state,
         "freshness": ticker_freshness(state),
         "price_source": "Bitget ticker 快照",
+        "source": f"{meta['product_label']} · Bitget 公开快照",
+        "updated_label": beijing(row.get("timestamp")) if row.get("timestamp") else None,
+        "connection": ticker_freshness(state),
         **meta,
     }
 
@@ -680,7 +701,10 @@ def radar(symbol="BTCUSDT", settings=None):
         "ema_boll": json_ready(cross) if cross else {"enabled": False, "note": "独立 EMA×布林未启用"},
         "pullback": json_ready(pull) if pull else {"enabled": False, "note": "多周期回踩未启用"},
         "plan": json_ready(plan),
-        "weights_note": "评分函数使用固定权重 30/20/20/15/15。设置页里的权重会保存，但目前不会改写这个分数。",
+        "weights_note": WEIGHTS_NOTE,
+        "gate_note": GATE_NOTE,
+        "gate_active": True,
+        "latency_note": LATENCY_NOTE,
         "auto_apply": False,
     }
     with _LOCK:

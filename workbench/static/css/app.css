@@ -68,7 +68,10 @@ h1 { margin: 6px 0 0; font-size: 32px; font-weight: 650; }
 .tabs { display: flex; flex-wrap: wrap; gap: 6px; }
 .tab { background: transparent; color: var(--muted); padding: 8px 12px; }
 .tab.active { background: #12324d; color: white; border-color: #1d6ea8; }
-.badge { margin: 0; font-size: 12px; white-space: nowrap; }
+.badge { margin: 0; font-size: 12px; }
+.latency, .facts { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.facts { padding-left: 1.1rem; }
+.latency { grid-column: 1 / -1; }
 .badge.live { color: var(--green-2); }
 .badge.delay { color: var(--gold); }
 .badge.down { color: var(--down); }

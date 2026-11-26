@@ -213,6 +213,8 @@ class ApiTests(unittest.TestCase):
         os.environ["QSL_PRESET_PATH"] = str(root / "user_presets.json")
         os.environ["QSL_SETTINGS_PATH"] = str(root / "site_settings.json")
         os.environ["QSL_DISABLE_FEED"] = "1"
+        os.environ.pop("QSL_ADMIN_TOKEN", None)
+        os.environ.pop("QSL_WRITE_LIMIT", None)
         self.client = TestClient(create_app())
 
     def tearDown(self):
@@ -232,6 +234,23 @@ class ApiTests(unittest.TestCase):
         self.assertIn("没有已授权", by_id["NVDA"]["reason"])
         self.assertIsNone(by_id["BTC"]["quote"]["price"])
         self.assertNotEqual(by_id["BTC"]["quote"]["freshness"], "实时")
+        for key in ("transport_ms", "median_ms", "p95_ms", "samples"):
+            self.assertIn(key, by_id["BTC"]["quote"])
+        self.assertIsNone(by_id["NVDA"]["quote"])
+        self.assertEqual(by_id["NVDA"]["source"], "未接通")
+        self.assertIsNone(by_id["NVDA"]["updated_at"])
+        self.assertEqual(by_id["NVDA"]["connection"], "未连接")
+        self.assertIn("NVDAUSDT", by_id["NVDA"]["not_substitute"])
+        self.assertEqual(by_id["XAU"]["freshness_label"], "无行情")
+        self.assertIn("不能代替 XAU/USD", by_id["XAU"]["not_substitute"])
+        settings = self.client.get("/api/settings").json()
+        self.assertFalse(settings["weights_applied"])
+        self.assertEqual(settings["scoring_weights"], [30, 20, 20, 15, 15])
+        self.assertIn("不会改变当前评分", settings["weights_note"])
+        self.assertTrue(settings["gate_active"])
+        self.assertIn("4 小时", settings["gate_note"])
+        self.assertIn("第二阶段", settings["gate_note"])
+        self.assertIn("不是已验收", settings["latency_note"])
         health = self.client.get("/api/health").json()
         self.assertFalse(health["trading"])
         self.assertFalse(health["cloud_alerts"])
@@ -247,6 +266,90 @@ class ApiTests(unittest.TestCase):
         blob = "\n".join(path.read_text(encoding="utf-8") for path in root.rglob("*") if path.suffix in {".html", ".js", ".css"})
         self.assertNotIn("Edit site", blob)
         self.assertNotIn("chatgpt", blob.lower())
+        self.assertIn('id="latency"', blob)
+        self.assertIn("median_ms", blob)
+        self.assertIn("p95_ms", blob)
+        self.assertIn("transport_ms", blob)
+        self.assertIn("不会改变当前评分", blob)
+
+
+class ScoreRuleTests(unittest.TestCase):
+    def frame(self, direction_4h=1, direction_1h=1):
+        import pandas as pd
+        from signals import Rules, score_frames
+
+        row = {
+            "ema7": 99, "rsi": 60, "macd": 1, "macd_signal": 0, "rsi_5m": 60,
+            "vol_avg": 10, "atr": 1, "open": 99, "high": 101, "low": 98, "close": 100,
+            "volume": 20, "direction_4H": direction_4h, "direction_1H": direction_1h,
+            "swing_low": 95, "swing_high": 105, "support": 90, "resistance": 110,
+            "far_low": 80, "far_high": 120,
+        }
+        return pd.DataFrame([row]), Rules(weights=(1, 1, 1, 1, 1)), score_frames
+
+    def test_saved_weights_do_not_change_score(self):
+        from signals import WEIGHTS
+
+        frame, rules, score_frames = self.frame()
+        self.assertEqual(tuple(WEIGHTS.values()), (30, 20, 20, 15, 15))
+        self.assertNotEqual(rules.weights, tuple(WEIGHTS.values()))
+        scored = score_frames(frame, rules)
+        self.assertEqual(int(scored.score_long.iloc[0]), 100)
+
+    def test_four_hour_and_one_hour_gate_still_blocks(self):
+        frame, rules, score_frames = self.frame(direction_4h=-1, direction_1h=1)
+        scored = score_frames(frame, rules)
+        self.assertEqual(int(scored.score_long.iloc[0]), 70)
+        self.assertFalse(bool(scored.valid_long.iloc[0]))
+        self.assertEqual(int(scored.side.iloc[0]), 0)
+
+
+class GuardTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        os.environ["QSL_PRESET_PATH"] = str(root / "user_presets.json")
+        os.environ["QSL_SETTINGS_PATH"] = str(root / "site_settings.json")
+        os.environ["QSL_DISABLE_FEED"] = "1"
+        os.environ.pop("QSL_ADMIN_TOKEN", None)
+        os.environ.pop("QSL_WRITE_LIMIT", None)
+
+    def tearDown(self):
+        os.environ.pop("QSL_ADMIN_TOKEN", None)
+        os.environ.pop("QSL_WRITE_LIMIT", None)
+        self.tmp.cleanup()
+
+    def current(self, client):
+        return client.get("/api/settings").json()["current"]
+
+    def test_remote_write_is_rejected_without_token(self):
+        remote = TestClient(create_app(), client=("203.0.113.8", 4400))
+        denied = remote.put("/api/settings", json=self.current(remote))
+        self.assertEqual(denied.status_code, 403)
+        self.assertIn("不能修改", denied.json()["error"])
+
+    def test_loopback_can_write_until_token_is_configured(self):
+        local = TestClient(create_app(), client=("127.0.0.1", 4401))
+        saved = local.put("/api/settings", json=self.current(local))
+        self.assertEqual(saved.status_code, 200)
+        os.environ["QSL_ADMIN_TOKEN"] = "phase1-token"
+        blocked = local.put("/api/settings", json=self.current(local))
+        self.assertEqual(blocked.status_code, 403)
+        allowed = local.put("/api/settings", json=self.current(local), headers={"X-Admin-Token": "phase1-token"})
+        self.assertEqual(allowed.status_code, 200)
+
+    def test_write_rate_limit(self):
+        os.environ["QSL_WRITE_LIMIT"] = "2"
+        client = TestClient(create_app(), client=("203.0.113.10", 4402))
+        body = {
+            "equity": 10000, "risk_pct": 1, "entry": 100, "stop": 95, "leverage": 1,
+            "fee_pct": 0.05, "slip_pct": 0.03, "atr_mult": 1.5, "min_qty": 0.0001,
+            "min_rr": 1.5, "mode": "固定止损价",
+        }
+        self.assertEqual(client.post("/api/risk", json=body).status_code, 200)
+        self.assertEqual(client.post("/api/risk", json=body).status_code, 200)
+        limited = client.post("/api/risk", json=body)
+        self.assertEqual(limited.status_code, 429)
 
 
 if __name__ == "__main__":

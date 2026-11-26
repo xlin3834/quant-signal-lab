@@ -10,6 +10,16 @@ from fastapi.staticfiles import StaticFiles
 
 from workbench.engine_path import PACKAGE  # noqa: F401
 from market_data import MarketDataError
+from workbench.guard import (
+    WindowLimiter,
+    client_host,
+    mutation,
+    settings_write,
+    write_decision,
+    write_limit,
+    write_policy,
+)
+from workbench.honesty import disclosures
 from workbench.research import (
     archive_report,
     calendar,
@@ -48,6 +58,20 @@ STATIC = Path(__file__).resolve().parent / "static"
 
 def create_app():
     app = FastAPI(title="信号实验室", docs_url=None, redoc_url=None)
+    limiter = WindowLimiter()
+
+    @app.middleware("http")
+    async def protect_writes(request: Request, call_next):
+        path = request.url.path
+        method = request.method.upper()
+        if mutation(path, method):
+            if not limiter.allow(f"{client_host(request)} {method} {path}", write_limit()):
+                return JSONResponse({"ok": False, "error": "请求过于频繁，请稍后再试。"}, status_code=429)
+            if settings_write(path, method):
+                allowed, message = write_decision(request)
+                if not allowed:
+                    return JSONResponse({"ok": False, "error": message}, status_code=403)
+        return await call_next(request)
 
     @app.exception_handler(WorkbenchError)
     async def user_error(_request, exc: WorkbenchError):
@@ -94,9 +118,10 @@ def create_app():
     def api_settings():
         current = load_settings()
         drifted, note = drift_note(current)
+        payload = disclosures()
         return {"ok": True, "current": current, "defaults": default_settings(),
                 "presets": presets_public(), "drifted": drifted, "drift_note": note,
-                "weights_note": "五项权重会保存。现行评分仍使用固定的 30/20/20/15/15，改数字不会假装分数已经变了。"}
+                "write_policy": write_policy(), **payload}
 
     @app.put("/api/settings")
     async def api_save_settings(request: Request):

@@ -57,11 +57,20 @@ def entry_terms(side, opening, stop, target, fee, slip):
 
 
 def score_frames(base, rules=Rules(), fee=.0006, slip=.0003):
+    """Score closed bars with the fixed WEIGHTS constant.
+
+    `rules.weights` is kept on the preset record and is intentionally not read.
+    Wiring saved weights into the score is phase 2; doing it now would change
+    the backtest baseline.
+    """
     result = base.copy()
     complete = base[["ema7", "rsi", "macd_signal", "rsi_5m", "vol_avg", "atr"]].notna().all(axis=1)
     spread = (base.high - base.low).where(base.high > base.low)
     candle_location = (base.close - base.low) / spread
     for side, suffix in ((1, "long"), (-1, "short")):
+        # Hard gate, unchanged in phase 1: a side is eligible only when the
+        # closed 4H and 1H directions both equal that side. A lower-timeframe
+        # bounce alone is rejected. Phase 2 will remove this unconditional veto.
         structure = (base.direction_4H == side) & (base.direction_1H == side)
         momentum = ((base.rsi - 50) * side > 0) & ((base.macd - base.macd_signal) * side > 0)
         volume = (base.volume >= base.vol_avg) & ((base.close - base.open) * side > 0)
@@ -69,6 +78,7 @@ def score_frames(base, rules=Rules(), fee=.0006, slip=.0003):
                    & ((base.close - base.ema7) * side > 0) & ((base.rsi_5m - 50) * side > 0))
         volatility = (base.atr / base.close).between(.001, .03)
         checks = (structure, momentum, volume, pattern, volatility)
+        # Phase 1 keeps this constant. Do not switch it to rules.weights.
         points = sum(check.astype(int) * weight for check, weight in zip(checks, WEIGHTS.values()))
         result[f"score_{suffix}"] = points
         result[f"reasons_{suffix}"] = [", ".join(label for label, passed in zip(WEIGHTS, flags) if passed)

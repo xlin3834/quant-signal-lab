@@ -95,6 +95,9 @@ def gap_rows():
             "kline_status": "未接通",
             "freshness": "数据源未接通",
             "quote_state": "未接通",
+            "source": "未接通",
+            "updated_label": None,
+            "connection": "未连接",
             "note": "未授权 Alpaca 或其他正股行情。NVDAUSDT 是 Bitget 代币化股票永续，不能代替这只正股。",
         },
         {
@@ -113,6 +116,9 @@ def gap_rows():
             "kline_status": "未接通",
             "freshness": "数据源未接通",
             "quote_state": "未接通",
+            "source": "未接通",
+            "updated_label": None,
+            "connection": "未连接",
             "note": "没有已授权的专业黄金现货行情。XAUUSDT、XAUTUSDT、PAXGUSDT 是不同产品，不在这里报价。",
         },
         {
@@ -131,6 +137,9 @@ def gap_rows():
             "kline_status": "未接通",
             "freshness": "数据源未接通",
             "quote_state": "未接通",
+            "source": "未接通",
+            "updated_label": None,
+            "connection": "未连接",
             "note": "未接入 CFD 行情，也不会用永续合约冒充。",
         },
     ]
@@ -212,6 +221,14 @@ def overlay_live(rows, snaps):
         item["exchange_ts"] = snap.get("timestamp")
         item["official_candidates_ok"] = bool(snap.get("official_candidates_ok"))
         item["freshness"] = snap.get("freshness") or item.get("freshness")
+        item["connection"] = item["freshness"]
+        item["median_ms"] = snap.get("median_ms")
+        item["p95_ms"] = snap.get("p95_ms")
+        item["samples"] = snap.get("samples")
+        if snap.get("exchange_time"):
+            item["updated_label"] = snap["exchange_time"]
+        if snap.get("origin"):
+            item["source"] = f"{item.get('product_label') or 'Bitget'} · {snap['origin']}"
         if snap.get("price") is not None:
             item["price"] = snap["price"]
             item["bid"] = snap.get("bid")
