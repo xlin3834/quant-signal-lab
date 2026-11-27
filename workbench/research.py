@@ -1024,10 +1024,13 @@ def parse_leaderboard(payload, sort="account", limit=30, direction="desc"):
                 return float(raw)
             except (TypeError, ValueError):
                 return None
+        day = num("day", "vlm")
         rows.append({
             "address": item.get("ethAddress"),
             "name": item.get("displayName") or "",
             "account_value": float(item["accountValue"]) if item.get("accountValue") not in (None, "") else None,
+            "account_value_basis": "Hyperliquid 排行榜 accountValue，不是永续 clearinghouse 权益",
+            "day_vlm": day,
             "day_pnl": num("day", "pnl"),
             "day_roi": num("day", "roi"),
             "week_pnl": num("week", "pnl"),
@@ -1035,7 +1038,7 @@ def parse_leaderboard(payload, sort="account", limit=30, direction="desc"):
             "month_pnl": num("month", "pnl"),
             "month_roi": num("month", "roi"),
         })
-    key = {"account": "account_value", "day": "day_roi", "week": "week_roi", "month": "month_roi"}.get(sort, "account_value")
+    key = {"account": "account_value", "day": "day_roi", "week": "week_roi", "month": "month_roi", "day_vlm": "day_vlm"}.get(sort, "account_value")
     reverse = direction != "asc"
     rows.sort(key=lambda row: ((row.get(key) is None), -(row.get(key) or 0) if reverse else (row.get(key) or 0)))
     if not reverse:
@@ -1057,7 +1060,7 @@ def _optional_float(value):
     return number if math.isfinite(number) else None
 
 
-def parse_positions(payload, address, name=""):
+def parse_positions(payload, address, name="", dex=""):
     """Open positions from a public Hyperliquid clearinghouse snapshot."""
     updated = beijing(payload.get("time")) if isinstance(payload, dict) and payload.get("time") else None
     display = name.strip() if isinstance(name, str) else ""
@@ -1090,9 +1093,34 @@ def parse_positions(payload, address, name=""):
             "leverage": _optional_float(leverage),
             "unrealized_pnl": _optional_float(position.get("unrealizedPnl")),
             "updated_at": updated,
-            "source": "Hyperliquid 公开持仓",
+            "dex": dex or "默认永续",
+            "source": "Hyperliquid 公开永续持仓" + (f"（{dex}）" if dex else ""),
         })
     return rows
+
+
+def open_positions_from_states(states, per_address=12):
+    """Turn clearinghouse snapshots into open positions. Flat accounts add nothing."""
+    rows = []
+    equities = {}
+    for item in states or []:
+        payload = item.get("payload") or {}
+        address = item.get("address") or ""
+        margin = payload.get("marginSummary") or {}
+        if address:
+            equities[address] = margin.get("accountValue")
+        rows.extend(parse_positions(payload, address, item.get("name") or "", item.get("dex") or ""))
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row["address"], []).append(row)
+    shown = []
+    omitted = []
+    for address, items in grouped.items():
+        items.sort(key=lambda row: abs((row.get("entry") or 0) * (row.get("size") or 0)), reverse=True)
+        shown.extend(items[:per_address])
+        if len(items) > per_address:
+            omitted.append({"address": address, "shown": per_address, "total": len(items)})
+    return shown, omitted, equities
 
 
 def _split_addresses(value):
@@ -1109,29 +1137,59 @@ def _split_addresses(value):
     return found[:12]
 
 
-def _positions_for(traders):
+def _post_info(body, timeout=(2, 4)):
+    response = requests.post(
+        HL_INFO, json=body, timeout=timeout, headers={"User-Agent": "quant-signal-lab-research"},
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def perp_dex_names():
+    now = time.time()
+    with _LOCK:
+        cached = _BOARD.get("dexes")
+        fresh = cached is not None and now - _BOARD.get("dexes_at", 0) < 3600
+    if fresh:
+        return list(cached)
+    try:
+        payload = _post_info({"type": "perpDexs"}, timeout=(2, 6))
+    except (requests.RequestException, ValueError):
+        return list(cached or [])
+    names = []
+    for item in payload or []:
+        if isinstance(item, dict) and item.get("name"):
+            names.append(item["name"])
+    with _LOCK:
+        _BOARD["dexes"] = names
+        _BOARD["dexes_at"] = time.time()
+    return names
+
+
+def _fetch_states(traders, include_other_dexes=False):
     from concurrent.futures import ThreadPoolExecutor
 
-    def one(trader):
-        address = trader.get("address")
-        if not address:
-            return []
-        try:
-            response = requests.post(
-                HL_INFO, json={"type": "clearinghouseState", "user": address}, timeout=(2, 4),
-                headers={"User-Agent": "quant-signal-lab-research"},
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except (requests.RequestException, ValueError):
-            return []
-        return parse_positions(payload, address, trader.get("name") or "")
+    dexes = [""]
+    if include_other_dexes:
+        dexes.extend(perp_dex_names())
 
-    if not traders:
+    def one(job):
+        trader, dex = job
+        address = trader.get("address")
+        body = {"type": "clearinghouseState", "user": address}
+        if dex:
+            body["dex"] = dex
+        try:
+            payload = _post_info(body)
+        except (requests.RequestException, ValueError):
+            return None
+        return {"address": address, "name": trader.get("name") or "", "dex": dex, "payload": payload}
+
+    jobs = [(trader, dex) for trader in traders if trader.get("address") for dex in dexes]
+    if not jobs:
         return []
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        groups = list(pool.map(one, traders))
-    return [row for group in groups for row in group]
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        return [item for item in pool.map(one, jobs) if item]
 
 
 def monitor(sort="account", limit=30, direction="desc", watched=""):
@@ -1143,6 +1201,7 @@ def monitor(sort="account", limit=30, direction="desc", watched=""):
         stored = _BOARD.get("rows")
         stored_at = _BOARD.get("fetched_at")
         stored_positions = list(_BOARD.get("positions") or [])
+        stored_equities = dict(_BOARD.get("equities") or {})
     payload = fresh
     if payload is None:
         try:
@@ -1157,24 +1216,44 @@ def monitor(sort="account", limit=30, direction="desc", watched=""):
             payload = stored
             stale = payload is not None
     rows = parse_leaderboard(payload, sort, limit, direction) if isinstance(payload, dict) else []
-    if rows and not stale:
-        positions = _positions_for(rows[:3])
+    omitted = []
+    if fresh is not None:
+        positions = stored_positions
+        with _LOCK:
+            omitted = list(_BOARD.get("omitted") or [])
+        for row in rows:
+            if row.get("address") in stored_equities:
+                row["perp_account_value"] = stored_equities[row["address"]]
+    elif isinstance(payload, dict):
+        active = parse_leaderboard(payload, sort="day_vlm", limit=8, direction="desc")
+        batch = []
+        seen = set()
+        for trader in list(rows[:5]) + active:
+            address = trader.get("address")
+            if address and address not in seen:
+                seen.add(address)
+                batch.append(trader)
+        states = _fetch_states(batch, include_other_dexes=False)
+        positions, omitted, equities = open_positions_from_states(states)
+        for row in rows:
+            if row.get("address") in equities:
+                row["perp_account_value"] = equities[row["address"]]
         with _LOCK:
             _BOARD["positions"] = positions
+            _BOARD["omitted"] = omitted
+            _BOARD["equities"] = equities
     else:
         positions = stored_positions
+        with _LOCK:
+            omitted = list(_BOARD.get("omitted") or [])
     watched_positions = []
     watched_errors = []
-    for address in _split_addresses(watched):
-        try:
-            response = requests.post(
-                HL_INFO, json={"type": "clearinghouseState", "user": address}, timeout=(2, 4),
-                headers={"User-Agent": "quant-signal-lab-research"},
-            )
-            response.raise_for_status()
-            watched_positions.extend(parse_positions(response.json(), address, ""))
-        except (requests.RequestException, ValueError) as exc:
-            watched_errors.append({"address": address, "error": type(exc).__name__})
+    watched_rows = [{"address": address, "name": ""} for address in _split_addresses(watched)]
+    if watched_rows:
+        states = _fetch_states(watched_rows, include_other_dexes=True)
+        watched_positions, _ignored, _equities = open_positions_from_states(states, per_address=20)
+        failed = set(_split_addresses(watched)) - {item.get("address") for item in states}
+        watched_errors.extend({"address": address, "error": "读取失败"} for address in failed)
     return {
         "ok": True,
         "stale": stale,
@@ -1182,8 +1261,10 @@ def monitor(sort="account", limit=30, direction="desc", watched=""):
         "updated_at": stored_at,
         "source": "Hyperliquid 公开持仓与排行榜",
         "notice": "这里是 Hyperliquid 公开交易员持仓，不是你的 Bitget 账户，也不能下单。没有交易密钥。刷新公开榜不会改你保存在浏览器里的自选地址。",
+        "account_value_note": "榜单 account_value 是 Hyperliquid 排行榜字段。perp_account_value 才是同一地址永续 clearinghouse 的权益，两者经常不一致。",
         "rows": rows,
         "positions": positions,
+        "positions_omitted": omitted,
         "watched_positions": watched_positions,
         "watched_errors": watched_errors,
         "matched": len((payload or {}).get("leaderboardRows") or []) if isinstance(payload, dict) else 0,
@@ -1197,25 +1278,26 @@ def public_wallet(address):
         int(address[2:], 16)
     except ValueError as exc:
         raise WorkbenchError("地址格式无效") from exc
-    try:
-        response = requests.post(HL_INFO, json={"type": "clearinghouseState", "user": address}, timeout=(4, 12),
-                                 headers={"User-Agent": "quant-signal-lab-research"})
-        response.raise_for_status()
-        payload = response.json()
-    except (requests.RequestException, ValueError) as exc:
-        raise MarketDataError(f"公开账户暂时读不到：{type(exc).__name__}") from exc
-    margin = payload.get("marginSummary") or {}
-    positions = parse_positions(payload, address, "")
+    states = _fetch_states([{"address": address, "name": ""}], include_other_dexes=True)
+    if not states:
+        raise MarketDataError("公开账户暂时读不到")
+    default = next((item.get("payload") or {} for item in states if not item.get("dex")), {})
+    margin = default.get("marginSummary") or {}
+    positions, omitted, _equities = open_positions_from_states(states, per_address=20)
+    flat_note = None if positions else "官方永续账户当前没有持仓。这不是请求失败，也没有用其他数据编造仓位。"
     return {
         "ok": True,
         "address": address,
         "name": "",
         "label": short_address(address),
         "account_value": margin.get("accountValue"),
-        "withdrawable": payload.get("withdrawable"),
-        "positions": positions[:20],
-        "updated_at": beijing(payload.get("time")) if payload.get("time") else None,
-        "notice": "这是 Hyperliquid 上该地址的公开持仓快照，不是你的 Bitget 账户，也不会下单。",
+        "account_value_basis": "Hyperliquid 永续 clearinghouseState.marginSummary.accountValue。排行榜 accountValue 是另一个字段，不能当成这笔权益。",
+        "withdrawable": default.get("withdrawable"),
+        "positions": positions,
+        "positions_omitted": omitted,
+        "flat_note": flat_note,
+        "updated_at": beijing(default.get("time")) if default.get("time") else None,
+        "notice": "这是 Hyperliquid 上该地址的公开永续持仓，不是你的 Bitget 账户，也不会下单。",
     }
 
 

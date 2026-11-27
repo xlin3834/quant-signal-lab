@@ -346,6 +346,56 @@ class DirectionAndMonitorTests(unittest.TestCase):
         self.assertEqual(rows[1]["mark"], 9)
         self.assertNotIn("交易员", rows[0]["label"])
 
+    def test_open_positions_keep_real_rows_and_skip_flat_accounts(self):
+        from workbench.research import open_positions_from_states
+
+        address = "0x" + "ab" * 20
+        flat = "0x" + "cd" * 20
+        shown, omitted, equities = open_positions_from_states([
+            {"address": flat, "name": "", "payload": {"marginSummary": {"accountValue": "10"}, "assetPositions": [], "time": 1795700000000}},
+            {"address": address, "name": "", "payload": {
+                "time": 1795700000000,
+                "marginSummary": {"accountValue": "2500"},
+                "assetPositions": [{"position": {
+                    "coin": "BTC", "szi": "1.5", "entryPx": "60000", "positionValue": "91500",
+                    "unrealizedPnl": "1500", "leverage": {"value": 10},
+                }}],
+            }},
+        ])
+        self.assertEqual(equities[flat], "10")
+        self.assertEqual(len(shown), 1)
+        self.assertEqual(shown[0]["coin"], "BTC")
+        self.assertEqual(shown[0]["side"], "多")
+        self.assertEqual(shown[0]["size"], 1.5)
+        self.assertEqual(shown[0]["entry"], 60000)
+        self.assertEqual(shown[0]["leverage"], 10)
+        self.assertEqual(shown[0]["unrealized_pnl"], 1500)
+        self.assertIsNotNone(shown[0]["mark"])
+        self.assertEqual(omitted, [])
+
+    def test_flat_wallet_route_returns_empty_positions(self):
+        from unittest.mock import patch
+
+        address = "0x" + "11" * 20
+        payload = {"marginSummary": {"accountValue": "10"}, "assetPositions": [], "time": 1795700000000, "withdrawable": "10"}
+
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return payload
+
+        with patch("workbench.research.requests.post", return_value=Response()), \
+             patch("workbench.research.perp_dex_names", return_value=[]):
+            response = TestClient(create_app()).get("/api/monitor/wallet", params={"address": address})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["positions"], [])
+        self.assertIn("没有持仓", body["flat_note"])
+        self.assertEqual(body["account_value"], "10")
+
     def test_wallet_get_is_not_method_not_allowed(self):
         client = TestClient(create_app())
         response = client.get("/api/monitor/wallet", params={"address": "test"})
