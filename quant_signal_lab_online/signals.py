@@ -15,6 +15,11 @@ class Rules:
     threshold: int = 65
     strong: int = 80
     minimum_rr: float = 1.5
+    early: int = 65
+    rvol: float = 1.0
+    atr_stop: float = 1.5
+    weights: tuple = (30, 20, 20, 15, 15)
+    extreme_atr: float = 0.04
 
 
 def aligned_frames(frames, params=Parameters()):
@@ -51,11 +56,31 @@ def entry_terms(side, opening, stop, target, fee, slip):
     return entry, risk, reward
 
 
+def _score_weights(rules):
+    """Use the saved five weights. Fall back to WEIGHTS if the tuple is unusable."""
+    raw = getattr(rules, "weights", None)
+    try:
+        weights = tuple(float(item) for item in raw)
+    except (TypeError, ValueError):
+        weights = ()
+    if len(weights) != len(WEIGHTS):
+        return tuple(WEIGHTS.values())
+    return weights
+
+
 def score_frames(base, rules=Rules(), fee=.0006, slip=.0003):
+    """Score closed bars with the saved five weights.
+
+    Higher-timeframe alignment is one of the five scored checks. It is context,
+    not a veto: a lower-timeframe setup can still be a candidate when 4H and 1H
+    disagree. Only closed bars are scored here.
+    """
     result = base.copy()
     complete = base[["ema7", "rsi", "macd_signal", "rsi_5m", "vol_avg", "atr"]].notna().all(axis=1)
     spread = (base.high - base.low).where(base.high > base.low)
     candle_location = (base.close - base.low) / spread
+    labels = tuple(WEIGHTS.keys())
+    weights = _score_weights(rules)
     for side, suffix in ((1, "long"), (-1, "short")):
         structure = (base.direction_4H == side) & (base.direction_1H == side)
         momentum = ((base.rsi - 50) * side > 0) & ((base.macd - base.macd_signal) * side > 0)
@@ -64,16 +89,19 @@ def score_frames(base, rules=Rules(), fee=.0006, slip=.0003):
                    & ((base.close - base.ema7) * side > 0) & ((base.rsi_5m - 50) * side > 0))
         volatility = (base.atr / base.close).between(.001, .03)
         checks = (structure, momentum, volume, pattern, volatility)
-        points = sum(check.astype(int) * weight for check, weight in zip(checks, WEIGHTS.values()))
+        points = sum(check.astype(int) * weight for check, weight in zip(checks, weights))
         result[f"score_{suffix}"] = points
-        result[f"reasons_{suffix}"] = [", ".join(label for label, passed in zip(WEIGHTS, flags) if passed)
+        result[f"higher_tf_{suffix}"] = structure
+        result[f"reasons_{suffix}"] = [", ".join(label for label, passed in zip(labels, flags) if passed)
                                       for flags in zip(*checks)]
         stop = base.swing_low if side == 1 else base.swing_high
         target = base.resistance if side == 1 else base.support
         target2 = base.far_high if side == 1 else base.far_low
         entry, risk, reward = entry_terms(side, base.close, stop, target, fee, slip)
         rr = reward / risk.where(risk > 0)
-        valid = (complete & structure & (points >= rules.threshold) & (rr >= rules.minimum_rr)
+        # 4H+1H alignment stays in the score as `structure`, but it no longer
+        # vetoes a completed lower-timeframe setup by itself.
+        valid = (complete & (points >= rules.threshold) & (rr >= rules.minimum_rr)
                  & ((entry - stop) * side > 0) & ((target2 - target) * side >= 0))
         for key, value in {"stop": stop, "target1": target, "target2": target2,
                            "rr": rr, "valid": valid}.items():
@@ -94,3 +122,42 @@ def make_plan(row):
     suffix = "long" if side == 1 else "short"
     return {"side": side, "stop": float(row[f"stop_{suffix}"]),
             "target1": float(row[f"target1_{suffix}"]), "target2": float(row[f"target2_{suffix}"])}
+
+
+def score_with_config(base, rules=Rules(), fee=.0006, slip=.0003, market_ok=True, range_mode=False):
+    """Preset-aware scoring. Official candidates stay close-confirmed; stale markets pause them."""
+    result = score_frames(base, rules, fee, slip)
+    rvol = (base.volume / base.vol_avg.replace(0, np.nan))
+    result["rvol"] = rvol
+    result["atr_pct"] = base.atr / base.close
+    extreme = result["atr_pct"] >= rules.extreme_atr
+    result["early_long"] = market_ok & ~extreme & (result.score_long >= rules.early)
+    result["early_short"] = market_ok & ~extreme & (result.score_short >= rules.early)
+    if range_mode:
+        mid = base.boll_mid
+        width = (base.boll_up - base.boll_low) / mid.replace(0, np.nan)
+        slope = base.ema20 - base.ema20.shift(3)
+        result["boll_width"] = width
+        result["ema_slope"] = slope
+        stretched = width > width.rolling(50, min_periods=10).median() * 1.8
+        trending = (base.direction_1H == base.direction_4H) & (base.direction_1H != 0) & stretched
+        result["range_invalid"] = trending.fillna(False)
+        # Do not issue official counter-trend candidates when the range regime has failed.
+        result.loc[result.range_invalid & (result.side == result.direction_1H), ["valid_long", "valid_short"]] = False
+        result["side"] = np.select([result.valid_long, result.valid_short], [1, -1], default=0)
+    if not market_ok or extreme.any():
+        paused = (not market_ok) | extreme
+        result.loc[paused, ["valid_long", "valid_short", "side"]] = [False, False, 0]
+        result.loc[paused, "grade"] = "暂停正式候选"
+    result["alert"] = np.select(
+        [result.early_long & (result.side != 1), result.early_short & (result.side != -1)],
+        ["临时预警·多", "临时预警·空"], default="",
+    )
+    result["grade"] = np.select(
+        [result.valid_long & (result.score_long >= rules.strong),
+         result.valid_short & (result.score_short >= rules.strong), result.side != 0],
+        ["强候选", "强候选", "普通候选"], default=result.grade,
+    )
+    if not market_ok:
+        result.loc[:, "grade"] = "数据过期，已暂停生成新的正式交易候选"
+    return result

@@ -1,0 +1,13 @@
+{
+  "name": "信号实验室 · 趋势判断工作台",
+  "short_name": "信号实验室",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#071018",
+  "theme_color": "#071018",
+  "lang": "zh-CN",
+  "icons": [
+    {"src": "/static/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}
+  ]
+}

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+quant_signal_lab_online/data/user_presets.json
+quant_signal_lab_online/data/*.sqlite3
+quant_signal_lab_online/data/cache/
+workbench/data/

@@ -1,0 +1,13 @@
+# New site only. Do not point https://aether-quant-lab.streamlit.app/ at this
+# branch or at workbench/Dockerfile. That Streamlit app stays on GitHub main
+# and quant_signal_lab_online/app.py. Applying this blueprint creates a separate
+# service. Render assigns the public URL after apply; the service name maps to
+# https://signal-lab-workbench.onrender.com. Nothing here is purchased.
+services:
+  - type: web
+    name: signal-lab-workbench
+    runtime: docker
+    branch: cursor/signal-lab-workbench-1d62
+    dockerfilePath: ./workbench/Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
