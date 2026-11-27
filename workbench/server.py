@@ -20,8 +20,11 @@ from workbench.guard import (
     write_policy,
 )
 from workbench.honesty import disclosures
+from workbench.notify import channel_config, deliver, format_message, runtime_status, set_channel
+from workbench.watchlist import load_watchlist, mutate
 from workbench.research import (
     archive_report,
+    market_scan,
     calendar,
     catalog_view,
     chart,
@@ -191,6 +194,57 @@ def create_app():
     @app.get("/api/cross")
     def api_cross(left: str = "BTCUSDT", right: str = "ETHUSDT", interval: str = "1H"):
         return cross_market(left, right, interval)
+
+    @app.get("/api/scan")
+    def api_scan(product: str = "crypto_perp", interval: str = "15m", cross_filter: str = "all"):
+        if interval not in {"5m", "15m", "30m", "1H", "4H", "1D"}:
+            return JSONResponse({"ok": False, "error": "扫描周期只支持 5m、15m、30m、1H、4H、1D"}, status_code=400)
+        return market_scan(product, interval, cross_filter)
+
+    @app.get("/api/watchlist")
+    def api_watchlist():
+        return {"ok": True, **load_watchlist(), "cap": 200}
+
+    @app.post("/api/watchlist")
+    async def api_watchlist_write(request: Request):
+        body = await request.json()
+        try:
+            payload = mutate(str(body.get("action") or ""), str(body.get("symbol") or ""),
+                             muted=body.get("muted"), timeframes=body.get("timeframes"))
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return {"ok": True, **payload}
+
+    @app.get("/api/alerts/status")
+    def api_alert_status():
+        return {"ok": True, "runtime": runtime_status(), "channels": channel_config()}
+
+    @app.post("/api/alerts/channel")
+    async def api_alert_channel(request: Request):
+        body = await request.json()
+        channel = str(body.get("channel") or "")
+        if channel in {"email", "telegram_channel", "telegram_dm"}:
+            allowed, message = write_decision(request)
+            if not allowed:
+                return JSONResponse({"ok": False, "error": message}, status_code=403)
+        try:
+            enabled = set_channel(channel, bool(body.get("enabled")))
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return {"ok": True, "enabled": enabled, "channels": channel_config()}
+
+    @app.post("/api/alerts/test")
+    async def api_alert_test(request: Request):
+        body = await request.json()
+        channel = str(body.get("channel") or "")
+        sample = {
+            "symbol": "BTCUSDT", "interval": "15m", "label": "EMA7上穿布林中轨", "ema": 7,
+            "price": "（测试，不是行情）", "ema_value": "（测试）", "boll_mid": "（测试）",
+            "time_text": "测试", "note": "这是渠道测试，不是真实交叉，也不是开仓指令。",
+        }
+        result = deliver(channel, format_message(sample))
+        result["live_event"] = False
+        return result
 
     @app.get("/api/calendar")
     def api_calendar():

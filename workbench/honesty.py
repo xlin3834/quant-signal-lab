@@ -29,7 +29,7 @@ EIGHT_FACTORS = (
     {"name": "多周期细权", "weight": 5, "scored": False, "reason": "4小时和1小时只作背景，不另计这 5 分"},
     {"name": "其余研究因子", "weight": 5, "scored": False, "reason": "未计算，不计入分数"},
 )
-CHART_DEFAULT = ("ema10", "ema120")
+CHART_DEFAULT = ("ema7", "ema10", "ema120", "boll18")
 
 
 def disclosures():

@@ -249,7 +249,7 @@ class ApiTests(unittest.TestCase):
         self.assertIn("会改变当前评分", settings["weights_note"])
         self.assertFalse(settings["gate_active"])
         self.assertIn("不再单独", settings["gate_note"])
-        self.assertEqual(settings["chart_default"], ["ema10", "ema120"])
+        self.assertEqual(settings["chart_default"], ["ema7", "ema10", "ema120", "boll18"])
         self.assertTrue(any(item["name"] == "合约资金" and item["scored"] is False for item in settings["eight_factor_research"]))
         self.assertIn("不是已验收", settings["latency_note"])
         health = self.client.get("/api/health").json()
@@ -271,7 +271,8 @@ class ApiTests(unittest.TestCase):
         self.assertIn("median_ms", blob)
         self.assertIn("p95_ms", blob)
         self.assertIn("transport_ms", blob)
-        self.assertIn("ema10: true", blob)
+        self.assertIn("ema7: true", blob)
+        self.assertNotIn('["risk","风险与仓位"]', blob.replace(" ", ""))
         self.assertIn("无法判断", blob)
         self.assertIn("做多", blob)
 
