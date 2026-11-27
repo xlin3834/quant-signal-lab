@@ -18,7 +18,9 @@ import numpy as np
 import pandas as pd
 import requests
 
+from workbench.crosses import attach_indicators, confirmed_crosses, latest_cross, rank_by_turnover, relation_snapshot
 from workbench.honesty import GATE_NOTE, LATENCY_NOTE, WEIGHTS_NOTE
+from workbench.notify import channel_config, runtime_status
 from workbench.catalog import (
     badge_for,
     classify_contract,
@@ -33,7 +35,7 @@ from workbench.engine_path import PACKAGE
 from workbench.store import WorkbenchError, load_settings, preset_file
 
 from backtest import Costs, simulate
-from indicators import Parameters, _ema, calculate
+from indicators import Parameters, calculate
 from macro_fib import FibParams, MacroParams, analyze_macro, fibonacci_grid, load_macro_frames
 from market_data import INTERVALS, MarketDataError, parse_candles, request_data
 from perpetual_market import build_rows, load_directory, load_tickers, quote_state
@@ -516,8 +518,12 @@ def _bar_records(frame, lengths, forming=None):
             "ema_short": _num_or_none(getattr(row, "ema20", None)),
             "ema_mid": _num_or_none(getattr(row, "ema50", None)),
             "ema_bg": _num_or_none(getattr(row, "ema200", None)),
-            "ema10": _num_or_none(getattr(row, "ema10", None)),
-            "ema120": _num_or_none(getattr(row, "ema120", None)),
+            "ema7": _num_or_none(getattr(row, "disp_ema7", None)),
+            "ema10": _num_or_none(getattr(row, "disp_ema10", None)),
+            "ema120": _num_or_none(getattr(row, "disp_ema120", None)),
+            "boll18_mid": _num_or_none(getattr(row, "disp_boll_mid", None)),
+            "boll18_up": _num_or_none(getattr(row, "disp_boll_up", None)),
+            "boll18_low": _num_or_none(getattr(row, "disp_boll_low", None)),
             "boll_mid": _num_or_none(getattr(row, "boll_mid", None)),
             "boll_up": _num_or_none(getattr(row, "boll_up", None)),
             "boll_low": _num_or_none(getattr(row, "boll_low", None)),
@@ -533,7 +539,8 @@ def _bar_records(frame, lengths, forming=None):
             "o": float(forming.open), "h": float(forming.high), "l": float(forming.low),
             "c": float(forming.close), "v": float(forming.volume),
             "ema_fast": None, "ema_short": None, "ema_mid": None, "ema_bg": None,
-            "ema10": None, "ema120": None,
+            "ema7": None, "ema10": None, "ema120": None,
+            "boll18_mid": None, "boll18_up": None, "boll18_low": None,
             "boll_mid": None, "boll_up": None, "boll_low": None,
             "macd": None, "macd_signal": None, "rsi": None, "atr": None,
             "forming": True,
@@ -570,10 +577,14 @@ def chart(symbol, interval="15m"):
     if closed.empty:
         raise MarketDataError("没有已收盘 K 线")
     calculated = calculate(closed, params)
-    calculated["ema10"] = _ema(calculated.close, 10)
-    calculated["ema120"] = _ema(calculated.close, 120)
+    display = attach_indicators([float(value) for value in calculated.close])
+    for key, values in display.items():
+        calculated[f"disp_{key}"] = values
     if symbol in CORE_SYMBOLS:
         label, product_class = PRODUCT_LABEL, "crypto_perp"
+    elif symbol in {"XAUUSDT", "XAGUSDT"}:
+        metal = "黄金" if symbol == "XAUUSDT" else "白银"
+        label, product_class = f"Bitget USDT 本位代币化{metal}永续", "tokenized_metal"
     else:
         if _label_from_directory(symbol) is None:
             try:
@@ -602,10 +613,33 @@ def chart(symbol, interval="15m"):
         "forming": forming is not None and not stale,
         "stale": bool(stale),
         "last_closed": beijing(last_close),
-        "default_layers": ["ema10", "ema120"],
+        "default_layers": ["ema7", "ema10", "ema120", "boll18"],
+        "indicator_style": {"ema7": "#f5c542", "ema10": "#3aa0ff", "ema120": "#b07cff", "boll": "#7f93a8"},
         "warning": "最后一根若标记为未收盘，只供观察，不能当作正式信号。" if forming is not None else "",
-        "banner": None if product_class == "crypto_perp" else f"图上是 {label}。它不是正股、现货黄金或 CFD。",
+        "banner": None if product_class == "crypto_perp" else f"图上是 {label}。它不是 XAU/USD 现货，也不是股票或 CFD。",
+        "cross_outcomes": _recent_outcomes(calculated),
+        "outcome_note": "下面是交叉之后的价格变化、最大有利波动和最大不利波动。没有规定进场、出场、止损和费用，所以不能称为胜率。",
     }
+
+
+def _recent_outcomes(frame):
+    bars = []
+    for row in frame.itertuples(index=False):
+        bars.append({
+            "t": int(pd.Timestamp(row.time).timestamp() * 1000),
+            "c": float(row.close),
+            "h": float(row.high),
+            "l": float(row.low),
+        })
+    from workbench.crosses import forward_path
+    reports = []
+    for event in confirmed_crosses(bars)[-3:]:
+        reports.append({
+            "label": event["label"],
+            "note": event["note"],
+            "windows": [forward_path(bars, event["index"], horizon) for horizon in (2, 4, 8)],
+        })
+    return reports
 
 
 def _directory_index():
@@ -1027,7 +1061,12 @@ def parse_leaderboard(payload, sort="account", limit=30, direction="desc"):
         day = num("day", "vlm")
         rows.append({
             "address": item.get("ethAddress"),
-            "name": item.get("displayName") or "",
+            "name": (item.get("displayName") or "").strip() or "未公开昵称",
+            "name_source": "displayName" if (item.get("displayName") or "").strip() else "none",
+            "max_drawdown": None,
+            "trade_count": None,
+            "win_rate": None,
+            "stats_note": "暂无数据",
             "account_value": float(item["accountValue"]) if item.get("accountValue") not in (None, "") else None,
             "account_value_basis": "Hyperliquid 排行榜 accountValue，不是永续 clearinghouse 权益",
             "day_vlm": day,
@@ -1374,6 +1413,54 @@ def _required(body, key, lo, hi):
     return value
 
 
+def market_scan(product="crypto_perp", interval="15m", cross_filter="all"):
+    """Top 20 by USDT turnover inside one product class, plus cross state."""
+    payload = directory()
+    pool = [row for row in payload["rows"] if row.get("product_class") == product]
+    prepared = []
+    for row in pool:
+        prepared.append({**row, "turnover_unit": "USDT", "quote": "USDT"})
+    ranked, blocked = rank_by_turnover(prepared, 20)
+    if product in {"spot_gold", "cash_equity", "cfd"}:
+        ranked, blocked = [], [{**row, "rank": None, "rank_reason": "没有可靠的现货或正股成交额，不编造排名"} for row in gap_rows() if row.get("product_class") == product]
+    for row in ranked:
+        try:
+            closed, _forming = load_closed(row["symbol"], interval, 240)
+            bars = [{"t": int(item.time.timestamp() * 1000), "c": float(item.close)} for item in closed.itertuples(index=False)]
+            snap = relation_snapshot([bar["c"] for bar in bars])
+            last = latest_cross(confirmed_crosses(bars))
+            row.update({
+                "ema7_vs_mid": snap.get("ema7_vs_mid"),
+                "ema10_vs_mid": snap.get("ema10_vs_mid"),
+                "ema120_vs_mid": snap.get("ema120_vs_mid"),
+                "last_cross": last["type"],
+                "last_cross_time": last["time"],
+                "kline_state": "已用收盘K线" if snap.get("ready") else (snap.get("reason") or "K线不足"),
+            })
+        except Exception as exc:
+            row.update({
+                "ema7_vs_mid": "数据不足", "ema10_vs_mid": "数据不足", "ema120_vs_mid": "数据不足",
+                "last_cross": "暂无交叉", "last_cross_time": None,
+                "kline_state": f"K线不可用：{exc}",
+            })
+    if cross_filter == "up":
+        ranked = [row for row in ranked if "上穿" in (row.get("last_cross") or "")]
+    elif cross_filter == "down":
+        ranked = [row for row in ranked if "下穿" in (row.get("last_cross") or "")]
+    elif cross_filter == "none":
+        ranked = [row for row in ranked if row.get("last_cross") in (None, "暂无交叉")]
+    return {
+        "ok": True,
+        "product": product,
+        "interval": interval,
+        "limit": 20,
+        "turnover_unit": "USDT" if ranked else None,
+        "rows": ranked,
+        "unranked": blocked,
+        "note": "只在同一产品类别、同一 USDT 成交额口径内取前 20。不足 20 个就显示实际数量。没有可靠成交额的不编排名。",
+    }
+
+
 def health():
     quotes = live_quotes() if feed_enabled() else {"badge": {"level": "down", "text": "行情流未启动"}, "feed": {"connected": False}}
     return {
@@ -1382,6 +1469,8 @@ def health():
         "trading": False,
         "orders": False,
         "cloud_alerts": False,
+        "monitor": runtime_status(),
+        "channels": channel_config(),
         "feeds": {
             "btc_eth": "Bitget 官方 USDT 本位永续 WebSocket，REST 只作回补",
             "nvda": "未接通",

@@ -15,7 +15,9 @@ export function drawChart(canvas, bars, layers, colors) {
     context.fillText("没有可绘制的 K 线", 24, 40);
     return;
   }
-  const show = layers || {ema10: true, ema120: true};
+  const show = layers || {ema7: true, ema10: true, ema120: true, boll: true};
+  const count = Math.max(30, Math.min(bars.length, show.count || bars.length));
+  bars = bars.slice(bars.length - count);
   const panels = [["price", show.macd || show.rsi || show.volume ? 0.62 : 1]];
   if (show.macd) panels.push(["macd", 0.16]);
   if (show.rsi) panels.push(["rsi", 0.16]);
@@ -42,19 +44,33 @@ function drawPanel(context, name, box, bars, show, colors) {
   const xAt = (index) => box.x + slot * index + slot / 2;
   const yAt = (value) => box.y + box.h - ((value - min) / span) * (box.h - 16) - 8;
   if (name === "price") {
-    if (show.boll) {
-      line(context, bars, "boll_up", xAt, yAt, "#35586d");
-      line(context, bars, "boll_low", xAt, yAt, "#35586d");
-      line(context, bars, "boll_mid", xAt, yAt, "#6f8ea3");
+    if (show.boll !== false) {
+      line(context, bars, "boll18_up", xAt, yAt, show.bollColor || "#8ea0b0", show.bollWidth || 1);
+      line(context, bars, "boll18_low", xAt, yAt, show.bollColor || "#8ea0b0", show.bollWidth || 1);
+      line(context, bars, "boll18_mid", xAt, yAt, show.bollColor || "#d5dde6", show.bollWidth || 1.4);
     }
-    if (show.extra) {
-      line(context, bars, "ema_bg", xAt, yAt, "#8aa4b8");
-      line(context, bars, "ema_mid", xAt, yAt, "#c9a0ff");
-      line(context, bars, "ema_short", xAt, yAt, "#5ec8ff");
-      line(context, bars, "ema_fast", xAt, yAt, "#f5c16c");
+    if (show.ema120 !== false) line(context, bars, "ema120", xAt, yAt, show.ema120Color || "#b07cff", show.ema120Width || 1.6);
+    if (show.ema10 !== false) line(context, bars, "ema10", xAt, yAt, show.ema10Color || "#3aa0ff", show.ema10Width || 1.6);
+    if (show.ema7 !== false) line(context, bars, "ema7", xAt, yAt, show.ema7Color || "#f5c542", show.ema7Width || 1.6);
+    (show.sr || []).forEach((price) => {
+      context.strokeStyle = "#e0b15a";
+      context.setLineDash([4, 4]);
+      context.beginPath();
+      context.moveTo(box.x, yAt(price));
+      context.lineTo(box.x + box.w, yAt(price));
+      context.stroke();
+      context.setLineDash([]);
+    });
+    if (Number.isInteger(show.crossIndex) && show.crossIndex >= 0 && show.crossIndex < bars.length) {
+      const x = xAt(show.crossIndex);
+      context.strokeStyle = "#d5dde6";
+      context.setLineDash([2, 3]);
+      context.beginPath();
+      context.moveTo(x, box.y);
+      context.lineTo(x, box.y + box.h);
+      context.stroke();
+      context.setLineDash([]);
     }
-    if (show.ema120 !== false) line(context, bars, "ema120", xAt, yAt, "#8aa4b8");
-    if (show.ema10 !== false) line(context, bars, "ema10", xAt, yAt, "#f5c16c");
     bars.forEach((bar, index) => {
       const up = bar.c >= bar.o;
       context.strokeStyle = up ? colors.up : colors.down;
@@ -104,8 +120,12 @@ function drawPanel(context, name, box, bars, show, colors) {
 
 function collect(name, bars, show) {
   if (name === "price") {
-    return bars.flatMap((bar) => [bar.h, bar.l, show.ema10 === false ? null : bar.ema10, show.ema120 === false ? null : bar.ema120,
-      show.extra ? bar.ema_fast : null, show.boll ? bar.boll_up : null, show.boll ? bar.boll_low : null].filter(number));
+    return bars.flatMap((bar) => [bar.h, bar.l,
+      show.ema7 === false ? null : bar.ema7,
+      show.ema10 === false ? null : bar.ema10,
+      show.ema120 === false ? null : bar.ema120,
+      show.boll === false ? null : bar.boll18_up,
+      show.boll === false ? null : bar.boll18_low].filter(number));
   }
   if (name === "volume") return bars.map((bar) => bar.v).filter(number);
   if (name === "macd") return bars.flatMap((bar) => [bar.macd, bar.macd_signal, 0]).filter(number);
@@ -113,7 +133,7 @@ function collect(name, bars, show) {
   return [];
 }
 
-function line(context, bars, key, xAt, yAt, color) {
+function line(context, bars, key, xAt, yAt, color, width=1.4) {
   context.beginPath();
   let started = false;
   bars.forEach((bar, index) => {
@@ -128,7 +148,7 @@ function line(context, bars, key, xAt, yAt, color) {
     } else context.lineTo(xAt(index), yAt(value));
   });
   context.strokeStyle = color;
-  context.lineWidth = 1.2;
+  context.lineWidth = width;
   context.stroke();
 }
 
@@ -138,4 +158,44 @@ function number(value) {
 
 function slotWidth(slot) {
   return Math.max(1.5, Math.min(7, slot * 0.62));
+}
+
+export function bindChart(canvas, getBars, getLayers, colors) {
+  if (canvas.dataset.bound) return;
+  canvas.dataset.bound = "1";
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const layers = getLayers();
+    const size = layers.count || getBars().length || 160;
+    layers.count = Math.max(40, Math.min(500, size + (event.deltaY > 0 ? 20 : -20)));
+    drawChart(canvas, getBars(), layers, colors());
+  }, {passive: false});
+  canvas.addEventListener("mousemove", (event) => {
+    const rect = canvas.getBoundingClientRect();
+    const layers = getLayers();
+    const count = Math.max(30, Math.min(getBars().length, layers.count || getBars().length));
+    const shown = getBars().slice(getBars().length - count);
+    const slot = (rect.width - 70) / Math.max(shown.length, 1);
+    const index = Math.min(shown.length - 1, Math.max(0, Math.floor((event.clientX - rect.left - 58) / slot)));
+    const bar = shown[index];
+    layers.crossIndex = index;
+    drawChart(canvas, getBars(), layers, colors());
+    const hover = document.querySelector("#hover");
+    if (hover && bar) {
+      hover.textContent = `收盘 ${bar.c} · EMA7 ${bar.ema7 ?? "—"} · EMA10 ${bar.ema10 ?? "—"} · EMA120 ${bar.ema120 ?? "—"} · 中轨 ${bar.boll18_mid ?? "—"}`;
+    }
+  });
+  canvas.addEventListener("click", (event) => {
+    if (!event.shiftKey) return;
+    const layers = getLayers();
+    const count = Math.max(30, Math.min(getBars().length, layers.count || getBars().length));
+    const shown = getBars().slice(getBars().length - count);
+    const rect = canvas.getBoundingClientRect();
+    const slot = (rect.width - 70) / Math.max(shown.length, 1);
+    const index = Math.min(shown.length - 1, Math.max(0, Math.floor((event.clientX - rect.left - 58) / slot)));
+    const price = shown[index]?.c;
+    if (!price) return;
+    layers.sr = [...(layers.sr || []), price].slice(-8);
+    drawChart(canvas, getBars(), layers, colors());
+  });
 }
