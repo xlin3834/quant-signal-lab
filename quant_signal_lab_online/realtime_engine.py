@@ -126,7 +126,7 @@ class SwapFeed:
 
     def request(self, symbol, intervals=("15m", "5m", "1H", "4H")):
         if symbol not in CORE_SYMBOLS:
-            raise MarketDataError("本阶段实时行情仅覆盖 BTCUSDT 与 ETHUSDT 的 USDT 永续")
+            raise MarketDataError("实时行情只覆盖 BTCUSDT、ETHUSDT、SOLUSDT、BNBUSDT 的 USDT 永续")
         with self.lock:
             if symbol not in self.clients and len(self.clients) >= 32:
                 raise MarketDataError("实时订阅容量已满")
@@ -431,7 +431,7 @@ def handler(feed):
             elif query.path in ("/ticker", "/status"):
                 symbol = parse_qs(query.query).get("symbol", [""])[0]
                 if symbol not in CORE_SYMBOLS:
-                    self.send_error(400, "Only BTCUSDT and ETHUSDT USDT perpetuals are enabled")
+                    self.send_error(400, "Only BTC, ETH, SOL and BNB USDT perpetuals are enabled")
                     return
                 payload = feed.snapshot(symbol)
             else:

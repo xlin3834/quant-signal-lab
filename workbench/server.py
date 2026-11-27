@@ -197,13 +197,25 @@ def create_app():
         return calendar()
 
     @app.get("/api/monitor")
-    def api_monitor(sort: str = "account", limit: int = 30, direction: str = "desc"):
-        return monitor(sort, limit, direction)
+    def api_monitor(sort: str = "account", limit: int = 30, direction: str = "desc", watched: str = ""):
+        return monitor(sort, limit, direction, watched)
+
+    @app.get("/api/monitor/wallet")
+    def api_wallet_get(address: str = ""):
+        try:
+            return public_wallet(address)
+        except MarketDataError as exc:
+            return {"ok": False, "error": str(exc), "positions": [], "address": address,
+                    "notice": "这个地址的公开持仓暂时读不到。榜单和其他地址不受影响。"}
 
     @app.post("/api/monitor/wallet")
     async def api_wallet(request: Request):
         body = await request.json()
-        return public_wallet(str(body.get("address") or ""))
+        try:
+            return public_wallet(str(body.get("address") or ""))
+        except MarketDataError as exc:
+            return {"ok": False, "error": str(exc), "positions": [], "address": body.get("address"),
+                    "notice": "这个地址的公开持仓暂时读不到。榜单和其他地址不受影响。"}
 
     @app.get("/")
     def index():

@@ -4,7 +4,7 @@ from market_data import INTERVALS, MarketDataError, closed_candles, parse_candle
 ROOT = "https://api.bitget.com/api/v2/mix/market"
 PRODUCT = "USDT-FUTURES"
 PRODUCT_LABEL = "Bitget USDT 本位永续"
-CORE_SYMBOLS = ("BTCUSDT", "ETHUSDT")
+CORE_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT")
 MIX_GRANULARITY = {"5m": "5m", "15m": "15m", "1H": "1H", "4H": "4H", "1D": "1D"}
 
 

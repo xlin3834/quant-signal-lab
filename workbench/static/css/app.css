@@ -71,7 +71,8 @@ h1 { margin: 6px 0 0; font-size: 32px; font-weight: 650; }
 .badge { margin: 0; font-size: 12px; }
 .latency, .facts { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .facts { padding-left: 1.1rem; }
-.latency { grid-column: 1 / -1; }
+.latency { grid-column: 1 / -1; white-space: pre-line; }
+.stance .name { font-size: 28px; }
 .badge.live { color: var(--green-2); }
 .badge.delay { color: var(--gold); }
 .badge.down { color: var(--down); }

@@ -228,7 +228,7 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn("chatgpt", page.text.lower())
         core = self.client.get("/api/core").json()
         by_id = {item["id"]: item for item in core["assets"]}
-        self.assertEqual(list(by_id), ["BTC", "ETH", "NVDA", "XAU"])
+        self.assertEqual(list(by_id), ["BTC", "ETH", "SOL", "BNB", "NVDA", "XAU"])
         self.assertIsNone(by_id["NVDA"]["quote"])
         self.assertIsNone(by_id["XAU"]["quote"])
         self.assertIn("没有已授权", by_id["NVDA"]["reason"])
@@ -244,12 +244,13 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(by_id["XAU"]["freshness_label"], "无行情")
         self.assertIn("不能代替 XAU/USD", by_id["XAU"]["not_substitute"])
         settings = self.client.get("/api/settings").json()
-        self.assertFalse(settings["weights_applied"])
         self.assertEqual(settings["scoring_weights"], [30, 20, 20, 15, 15])
-        self.assertIn("不会改变当前评分", settings["weights_note"])
-        self.assertTrue(settings["gate_active"])
-        self.assertIn("4 小时", settings["gate_note"])
-        self.assertIn("第二阶段", settings["gate_note"])
+        self.assertTrue(settings["weights_applied"])
+        self.assertIn("会改变当前评分", settings["weights_note"])
+        self.assertFalse(settings["gate_active"])
+        self.assertIn("不再单独", settings["gate_note"])
+        self.assertEqual(settings["chart_default"], ["ema10", "ema120"])
+        self.assertTrue(any(item["name"] == "合约资金" and item["scored"] is False for item in settings["eight_factor_research"]))
         self.assertIn("不是已验收", settings["latency_note"])
         health = self.client.get("/api/health").json()
         self.assertFalse(health["trading"])
@@ -270,7 +271,9 @@ class ApiTests(unittest.TestCase):
         self.assertIn("median_ms", blob)
         self.assertIn("p95_ms", blob)
         self.assertIn("transport_ms", blob)
-        self.assertIn("不会改变当前评分", blob)
+        self.assertIn("ema10: true", blob)
+        self.assertIn("无法判断", blob)
+        self.assertIn("做多", blob)
 
 
 class ScoreRuleTests(unittest.TestCase):
@@ -287,21 +290,68 @@ class ScoreRuleTests(unittest.TestCase):
         }
         return pd.DataFrame([row]), Rules(weights=(1, 1, 1, 1, 1)), score_frames
 
-    def test_saved_weights_do_not_change_score(self):
+    def test_saved_weights_change_score(self):
         from signals import WEIGHTS
 
         frame, rules, score_frames = self.frame()
         self.assertEqual(tuple(WEIGHTS.values()), (30, 20, 20, 15, 15))
         self.assertNotEqual(rules.weights, tuple(WEIGHTS.values()))
         scored = score_frames(frame, rules)
-        self.assertEqual(int(scored.score_long.iloc[0]), 100)
+        self.assertEqual(int(scored.score_long.iloc[0]), 5)
 
-    def test_four_hour_and_one_hour_gate_still_blocks(self):
-        frame, rules, score_frames = self.frame(direction_4h=-1, direction_1h=1)
-        scored = score_frames(frame, rules)
+    def test_four_hour_disagreement_does_not_veto(self):
+        from signals import Rules, score_frames
+
+        frame, _rules, _score = self.frame(direction_4h=-1, direction_1h=1)
+        scored = score_frames(frame, Rules())
         self.assertEqual(int(scored.score_long.iloc[0]), 70)
-        self.assertFalse(bool(scored.valid_long.iloc[0]))
-        self.assertEqual(int(scored.side.iloc[0]), 0)
+        self.assertTrue(bool(scored.valid_long.iloc[0]))
+        self.assertEqual(int(scored.side.iloc[0]), 1)
+        self.assertFalse(bool(scored.higher_tf_long.iloc[0]))
+
+
+class DirectionAndMonitorTests(unittest.TestCase):
+    def test_old_preset_names_stay_and_research_modes_are_added(self):
+        from presets import BUILTINS, PRESET_NAMES
+
+        for name in ("敏捷型", "均衡型", "稳健型", "震荡行情型", "自定义"):
+            self.assertIn(name, PRESET_NAMES)
+        self.assertEqual(BUILTINS["稳健型"].threshold, 80)
+        self.assertEqual(BUILTINS["稳健初始"].threshold, 75)
+        self.assertEqual(BUILTINS["保守"].threshold, 85)
+        self.assertEqual(BUILTINS["超短线"].threshold, 55)
+        self.assertEqual(BUILTINS["超短线"].weights, (20, 20, 15, 15, 10))
+
+    def test_missing_scores_are_undecided_and_positions_are_parsed(self):
+        from workbench.research import build_conclusion, parse_positions
+
+        missing = build_conclusion(True, 0, None, None, "", "", "多", "空")
+        self.assertEqual(missing["action"], "无法判断")
+        decided = build_conclusion(True, 1, 70, 20, "动量", "", "空", "多", "", False)
+        self.assertEqual(decided["action"], "做多")
+        self.assertIn("4小时空", decided["higher_tf"])
+        rows = parse_positions({
+            "time": 1795700000000,
+            "assetPositions": [
+                {"position": {"coin": "BTC", "szi": "0.2", "entryPx": "100", "positionValue": "22",
+                              "unrealizedPnl": "1.5", "leverage": {"value": 5}}},
+                {"position": {"coin": "ETH", "szi": "-1", "entryPx": "10", "markPx": "9",
+                              "unrealizedPnl": "-1", "leverage": {"value": 2}}},
+                {"position": {"coin": "SOL", "szi": "0", "entryPx": "1"}},
+            ],
+        }, "0x1234567890abcdef1234567890abcdef12345678", "")
+        self.assertEqual([row["side"] for row in rows], ["多", "空"])
+        self.assertEqual(rows[0]["name"], "")
+        self.assertTrue(rows[0]["label"].startswith("0x"))
+        self.assertEqual(rows[1]["mark"], 9)
+        self.assertNotIn("交易员", rows[0]["label"])
+
+    def test_wallet_get_is_not_method_not_allowed(self):
+        client = TestClient(create_app())
+        response = client.get("/api/monitor/wallet", params={"address": "test"})
+        self.assertNotEqual(response.status_code, 405)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["ok"], False)
 
 
 class GuardTests(unittest.TestCase):

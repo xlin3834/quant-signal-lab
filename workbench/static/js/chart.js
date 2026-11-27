@@ -1,4 +1,4 @@
-export function drawChart(canvas, bars, mode, colors) {
+export function drawChart(canvas, bars, layers, colors) {
   const context = canvas.getContext("2d");
   const width = canvas.clientWidth || 640;
   const height = canvas.clientHeight || 420;
@@ -15,24 +15,25 @@ export function drawChart(canvas, bars, mode, colors) {
     context.fillText("没有可绘制的 K 线", 24, 40);
     return;
   }
-  const panels = mode === "four"
-    ? [["price", 0.52], ["macd", 0.16], ["rsi", 0.16], ["volume", 0.16]]
-    : mode === "candle"
-      ? [["price", 1]]
-      : [["price", 0.78], ["volume", 0.22]];
+  const show = layers || {ema10: true, ema120: true};
+  const panels = [["price", show.macd || show.rsi || show.volume ? 0.62 : 1]];
+  if (show.macd) panels.push(["macd", 0.16]);
+  if (show.rsi) panels.push(["rsi", 0.16]);
+  if (show.volume) panels.push(["volume", 0.16]);
+  const total = panels.reduce((sum, item) => sum + item[1], 0);
   const pad = {l: 58, r: 12, t: 10, b: 8};
   let y = 8;
   panels.forEach(([name, share], index) => {
-    const box = {x: pad.l, y, w: width - pad.l - pad.r, h: Math.max(36, height * share - (index === panels.length - 1 ? 16 : 8))};
+    const box = {x: pad.l, y, w: width - pad.l - pad.r, h: Math.max(36, height * (share / total) - (index === panels.length - 1 ? 16 : 8))};
     y += box.h + 6;
-    drawPanel(context, name, box, bars, mode, colors);
+    drawPanel(context, name, box, bars, show, colors);
   });
 }
 
-function drawPanel(context, name, box, bars, mode, colors) {
+function drawPanel(context, name, box, bars, show, colors) {
   context.strokeStyle = "#173044";
   context.strokeRect(box.x, box.y, box.w, box.h);
-  const values = collect(name, bars, mode);
+  const values = collect(name, bars, show);
   if (!values.length) return;
   const min = Math.min(...values);
   const max = Math.max(...values);
@@ -41,15 +42,19 @@ function drawPanel(context, name, box, bars, mode, colors) {
   const xAt = (index) => box.x + slot * index + slot / 2;
   const yAt = (value) => box.y + box.h - ((value - min) / span) * (box.h - 16) - 8;
   if (name === "price") {
-    if (mode !== "candle") {
+    if (show.boll) {
       line(context, bars, "boll_up", xAt, yAt, "#35586d");
       line(context, bars, "boll_low", xAt, yAt, "#35586d");
       line(context, bars, "boll_mid", xAt, yAt, "#6f8ea3");
+    }
+    if (show.extra) {
       line(context, bars, "ema_bg", xAt, yAt, "#8aa4b8");
       line(context, bars, "ema_mid", xAt, yAt, "#c9a0ff");
       line(context, bars, "ema_short", xAt, yAt, "#5ec8ff");
       line(context, bars, "ema_fast", xAt, yAt, "#f5c16c");
     }
+    if (show.ema120 !== false) line(context, bars, "ema120", xAt, yAt, "#8aa4b8");
+    if (show.ema10 !== false) line(context, bars, "ema10", xAt, yAt, "#f5c16c");
     bars.forEach((bar, index) => {
       const up = bar.c >= bar.o;
       context.strokeStyle = up ? colors.up : colors.down;
@@ -97,9 +102,10 @@ function drawPanel(context, name, box, bars, mode, colors) {
   context.fillText(name.toUpperCase(), box.x + 6, box.y + 12);
 }
 
-function collect(name, bars, mode) {
+function collect(name, bars, show) {
   if (name === "price") {
-    return bars.flatMap((bar) => [bar.h, bar.l, bar.ema_fast, bar.ema_short, bar.ema_mid, bar.boll_up, bar.boll_low].filter(number));
+    return bars.flatMap((bar) => [bar.h, bar.l, show.ema10 === false ? null : bar.ema10, show.ema120 === false ? null : bar.ema120,
+      show.extra ? bar.ema_fast : null, show.boll ? bar.boll_up : null, show.boll ? bar.boll_low : null].filter(number));
   }
   if (name === "volume") return bars.map((bar) => bar.v).filter(number);
   if (name === "macd") return bars.flatMap((bar) => [bar.macd, bar.macd_signal, 0]).filter(number);

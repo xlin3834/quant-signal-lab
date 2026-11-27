@@ -22,10 +22,11 @@ class RealtimeEngineTests(unittest.TestCase):
 
     def test_core_symbols_only(self):
         feed = SwapFeed()
-        with self.assertRaisesRegex(Exception, "BTCUSDT"):
-            feed.request("SOLUSDT")
-        feed.request("ETHUSDT")
-        self.assertIn("ETHUSDT", feed.subscriptions())
+        with self.assertRaisesRegex(Exception, "USDT 永续"):
+            feed.request("NVDAUSDT")
+        for symbol in ("ETHUSDT", "SOLUSDT", "BNBUSDT"):
+            feed.request(symbol)
+            self.assertIn(symbol, feed.subscriptions())
 
     def test_rejects_spot_product_frames(self):
         feed = SwapFeed()

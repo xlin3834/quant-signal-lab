@@ -33,7 +33,7 @@ from workbench.engine_path import PACKAGE
 from workbench.store import WorkbenchError, load_settings, preset_file
 
 from backtest import Costs, simulate
-from indicators import Parameters, calculate
+from indicators import Parameters, _ema, calculate
 from macro_fib import FibParams, MacroParams, analyze_macro, fibonacci_grid, load_macro_frames
 from market_data import INTERVALS, MarketDataError, parse_candles, request_data
 from perpetual_market import build_rows, load_directory, load_tickers, quote_state
@@ -51,7 +51,7 @@ from strategy_modules import (
     pullback_plan,
     shocks,
 )
-from swap_data import MIX_GRANULARITY, PRODUCT, PRODUCT_LABEL, ROOT, fetch_swap_candles
+from swap_data import CORE_SYMBOLS, MIX_GRANULARITY, PRODUCT, PRODUCT_LABEL, ROOT, fetch_swap_candles
 
 BJ = ZoneInfo("Asia/Shanghai")
 BLOCKED = {
@@ -124,7 +124,7 @@ def get_feed():
     from realtime_engine import get_hub
 
     hub = get_hub()
-    for symbol in ("BTCUSDT", "ETHUSDT"):
+    for symbol in CORE_SYMBOLS:
         try:
             hub.request(symbol)
         except MarketDataError:
@@ -192,28 +192,37 @@ def live_quotes():
     error = None
     connected = False
     if not feed_enabled():
-        for symbol in ("BTCUSDT", "ETHUSDT"):
+        for symbol in CORE_SYMBOLS:
             symbols[symbol] = _blank_snap(symbol, "断线", "行情流未启动")
     else:
         try:
             hub = get_feed()
             connected = bool(hub and hub.connected)
-            for symbol in ("BTCUSDT", "ETHUSDT"):
+            for symbol in CORE_SYMBOLS:
                 symbols[symbol] = _public_snap(hub.snapshot(symbol))
         except (MarketDataError, OSError, RuntimeError) as exc:
             error = str(exc)
-            for symbol in ("BTCUSDT", "ETHUSDT"):
+            for symbol in CORE_SYMBOLS:
                 symbols[symbol] = _blank_snap(symbol, "断线", error)
     payload = {
         "server_ms": now_ms(),
         "feed": {"connected": connected, "error": error, "product": PRODUCT_LABEL},
         "symbols": symbols,
-        "badge": badge_for(symbols.get("BTCUSDT"), symbols.get("ETHUSDT")),
+        "badge": _stream_badge(symbols),
     }
     return payload
 
 
-def _live_asset(asset_id, name, symbol, quote):
+def _stream_badge(symbols):
+    snaps = [symbols.get(symbol) or {} for symbol in CORE_SYMBOLS]
+    if any(item.get("price") is None or item.get("freshness") in {"断线", "不可用", "过期", "权限不足", "数据异常"} for item in snaps):
+        return {"level": "down", "text": "Bitget价格流 · 已暂停"}
+    if all(item.get("freshness") == "实时" and item.get("origin") == "WebSocket" for item in snaps):
+        return {"level": "live", "text": "Bitget价格流 · 实时"}
+    return {"level": "delay", "text": "Bitget价格流 · 延迟"}
+
+
+def _live_asset(asset_id, name, symbol, quote, not_substitute):
     freshness = None if quote is None else quote.get("freshness")
     origin = None if quote is None else quote.get("origin")
     if freshness == "实时" and origin == "WebSocket":
@@ -235,7 +244,7 @@ def _live_asset(asset_id, name, symbol, quote):
         "updated_at": None if quote is None else quote.get("exchange_time"),
         "connection": connection,
         "freshness_label": freshness or "无行情",
-        "not_substitute": "这是 USDT 本位永续，不是现货。",
+        "not_substitute": not_substitute,
         "latency_note": LATENCY_NOTE,
     }
 
@@ -264,8 +273,10 @@ def core_assets(quotes=None):
     symbols = quotes["symbols"]
     return {
         "assets": [
-            _live_asset("BTC", "比特币", "BTCUSDT", symbols.get("BTCUSDT")),
-            _live_asset("ETH", "以太坊", "ETHUSDT", symbols.get("ETHUSDT")),
+            _live_asset("BTC", "比特币", "BTCUSDT", symbols.get("BTCUSDT"), "这是 Bitget USDT 本位永续，不是现货。"),
+            _live_asset("ETH", "以太坊", "ETHUSDT", symbols.get("ETHUSDT"), "这是 Bitget USDT 本位永续，不是现货。"),
+            _live_asset("SOL", "索拉纳", "SOLUSDT", symbols.get("SOLUSDT"), "这是 Bitget 的 SOLUSDT 永续，不是其他交易所的现货。"),
+            _live_asset("BNB", "BNB", "BNBUSDT", symbols.get("BNBUSDT"), "这是 Bitget 的 BNBUSDT 永续，不是币安现货。"),
             _closed_asset(
                 "NVDA", "英伟达", "NVDA", "cash_equity", "美股正股", BLOCKED["NVDA"],
                 "NVDAUSDT 是代币化股票永续，不能代替这只正股，这里也不引用它的价格。",
@@ -411,7 +422,7 @@ def load_closed(symbol, interval, limit=200):
         frame = cached["frame"]
     else:
         frame = None
-        if symbol in {"BTCUSDT", "ETHUSDT"} and interval in MIX_GRANULARITY:
+        if symbol in CORE_SYMBOLS and interval in MIX_GRANULARITY:
             hub = get_feed()
             if hub is not None:
                 try:
@@ -505,6 +516,8 @@ def _bar_records(frame, lengths, forming=None):
             "ema_short": _num_or_none(getattr(row, "ema20", None)),
             "ema_mid": _num_or_none(getattr(row, "ema50", None)),
             "ema_bg": _num_or_none(getattr(row, "ema200", None)),
+            "ema10": _num_or_none(getattr(row, "ema10", None)),
+            "ema120": _num_or_none(getattr(row, "ema120", None)),
             "boll_mid": _num_or_none(getattr(row, "boll_mid", None)),
             "boll_up": _num_or_none(getattr(row, "boll_up", None)),
             "boll_low": _num_or_none(getattr(row, "boll_low", None)),
@@ -520,6 +533,7 @@ def _bar_records(frame, lengths, forming=None):
             "o": float(forming.open), "h": float(forming.high), "l": float(forming.low),
             "c": float(forming.close), "v": float(forming.volume),
             "ema_fast": None, "ema_short": None, "ema_mid": None, "ema_bg": None,
+            "ema10": None, "ema120": None,
             "boll_mid": None, "boll_up": None, "boll_low": None,
             "macd": None, "macd_signal": None, "rsi": None, "atr": None,
             "forming": True,
@@ -533,6 +547,10 @@ def resolve_symbol(symbol):
         raw = "BTCUSDT"
     elif raw in {"ETHEREUM", "ETH"}:
         raw = "ETHUSDT"
+    elif raw in {"SOL", "SOLANA"}:
+        raw = "SOLUSDT"
+    elif raw == "BNB":
+        raw = "BNBUSDT"
     if raw in BLOCKED or raw.replace("-", "") in {"XAUUSD"}:
         key = "XAUUSD" if "XAU" in raw and "USDT" not in raw else raw
         if raw in {"XAU", "XAUUSD", "XAU/USD"}:
@@ -552,7 +570,9 @@ def chart(symbol, interval="15m"):
     if closed.empty:
         raise MarketDataError("没有已收盘 K 线")
     calculated = calculate(closed, params)
-    if symbol in {"BTCUSDT", "ETHUSDT"}:
+    calculated["ema10"] = _ema(calculated.close, 10)
+    calculated["ema120"] = _ema(calculated.close, 120)
+    if symbol in CORE_SYMBOLS:
         label, product_class = PRODUCT_LABEL, "crypto_perp"
     else:
         if _label_from_directory(symbol) is None:
@@ -582,6 +602,7 @@ def chart(symbol, interval="15m"):
         "forming": forming is not None and not stale,
         "stale": bool(stale),
         "last_closed": beijing(last_close),
+        "default_layers": ["ema10", "ema120"],
         "warning": "最后一根若标记为未收盘，只供观察，不能当作正式信号。" if forming is not None else "",
         "banner": None if product_class == "crypto_perp" else f"图上是 {label}。它不是正股、现货黄金或 CFD。",
     }
@@ -607,10 +628,57 @@ def _side_name(side):
     return {1: "多", -1: "空", 0: "观望"}.get(int(side or 0), "观望")
 
 
+def build_conclusion(market_ok, side, score_long, score_short, reasons_long, reasons_short,
+                     direction_4h, direction_1h, alert="", forming=False):
+    """Closed-bar stance. Missing scores stay 无法判断. Unclosed alerts stay provisional."""
+    higher = f"4小时{direction_4h or '未知'} · 1小时{direction_1h or '未知'}"
+    if score_long is None or score_short is None:
+        return {
+            "action": "无法判断", "status": "数据不足", "score_long": score_long, "score_short": score_short,
+            "reason": "已收盘数据不足，不能给出做多、做空或观望。", "higher_tf": higher, "provisional": "",
+        }
+    if not market_ok:
+        return {
+            "action": "无法判断", "status": "行情不可核验", "score_long": score_long, "score_short": score_short,
+            "reason": f"行情过期或断线，暂停方向判断。多头 {score_long:g} / 空头 {score_short:g}。分数不是胜率。",
+            "higher_tf": higher, "provisional": "",
+        }
+    tail = "分数不是胜率，也不会自动下单。"
+    background = f"更高周期只作背景：{higher}。"
+    if side == 1:
+        return {
+            "action": "做多", "status": "已收盘确认", "score_long": score_long, "score_short": score_short,
+            "reason": f"已收盘多头 {score_long:g}，空头 {score_short:g}。{reasons_long or ''} {background}{tail}",
+            "higher_tf": higher,
+            "provisional": "另有未收盘K线，不改变这条已收盘结论。" if forming else "",
+        }
+    if side == -1:
+        return {
+            "action": "做空", "status": "已收盘确认", "score_long": score_long, "score_short": score_short,
+            "reason": f"已收盘空头 {score_short:g}，多头 {score_long:g}。{reasons_short or ''} {background}{tail}",
+            "higher_tf": higher,
+            "provisional": "另有未收盘K线，不改变这条已收盘结论。" if forming else "",
+        }
+    provisional = ""
+    if alert == "临时预警·多":
+        provisional = "未确认做多倾向"
+    elif alert == "临时预警·空":
+        provisional = "未确认做空倾向"
+    reason = f"多头 {score_long:g} / 空头 {score_short:g}，未形成已收盘正式候选。{background}"
+    if provisional:
+        reason += f"{provisional}，不能当成已经确认的方向。"
+    reason += tail
+    return {
+        "action": "观望", "status": "未确认" if provisional else "已收盘",
+        "score_long": score_long, "score_short": score_short, "reason": reason,
+        "higher_tf": higher, "provisional": provisional,
+    }
+
+
 def radar(symbol="BTCUSDT", settings=None):
     symbol = resolve_symbol(symbol)
-    if symbol not in {"BTCUSDT", "ETHUSDT"}:
-        raise WorkbenchError("正式评分只对已接通的 BTCUSDT 与 ETHUSDT 永续计算，不为其他产品编造分数。")
+    if symbol not in CORE_SYMBOLS:
+        raise WorkbenchError("正式评分只对已接通的 BTC、ETH、SOL、BNB USDT 永续计算。其他产品不会编造方向。")
     settings = settings or load_settings()
     key = (symbol, json.dumps(settings["modules"]["intraday"], sort_keys=True), settings["applied_preset"])
     now = time.time()
@@ -672,6 +740,16 @@ def radar(symbol="BTCUSDT", settings=None):
         )
         plan["note"] = "参考演算，不是委托，也不会发送到交易所。"
     direction = _num_or_none(getattr(last, "direction_4H", None))
+    direction_1h = _num_or_none(getattr(last, "direction_1H", None))
+    direction_1h_text = "多" if direction_1h == 1 else "空" if direction_1h == -1 else "中性"
+    direction_4h_text = "多" if direction == 1 else "空" if direction == -1 else "中性"
+    alert = "" if not market_ok or pd.isna(getattr(last, "alert", "")) else str(getattr(last, "alert", "") or "")
+    conclusion = build_conclusion(
+        market_ok, side, _num_or_none(last.score_long), _num_or_none(last.score_short),
+        None if pd.isna(getattr(last, "reasons_long", None)) else str(last.reasons_long),
+        None if pd.isna(getattr(last, "reasons_short", None)) else str(last.reasons_short),
+        direction_4h_text, direction_1h_text, alert, forming is not None,
+    )
     payload = {
         "ok": True,
         "symbol": symbol,
@@ -691,7 +769,9 @@ def radar(symbol="BTCUSDT", settings=None):
         "close": _num_or_none(last.close),
         "support": _num_or_none(getattr(last, "support", None)) or _num_or_none(getattr(last, "swing_low", None)),
         "resistance": _num_or_none(getattr(last, "resistance", None)) or _num_or_none(getattr(last, "swing_high", None)),
-        "direction_4h": "多" if direction == 1 else "空" if direction == -1 else "中性",
+        "direction_4h": direction_4h_text,
+        "direction_1h": direction_1h_text,
+        "conclusion": conclusion,
         "reasons_long": None if pd.isna(getattr(last, "reasons_long", None)) else str(last.reasons_long),
         "reasons_short": None if pd.isna(getattr(last, "reasons_short", None)) else str(last.reasons_short),
         "time": beijing(last.time),
@@ -703,7 +783,7 @@ def radar(symbol="BTCUSDT", settings=None):
         "plan": json_ready(plan),
         "weights_note": WEIGHTS_NOTE,
         "gate_note": GATE_NOTE,
-        "gate_active": True,
+        "gate_active": False,
         "latency_note": LATENCY_NOTE,
         "auto_apply": False,
     }
@@ -963,31 +1043,150 @@ def parse_leaderboard(payload, sort="account", limit=30, direction="desc"):
     return rows[: max(1, min(int(limit), 50))]
 
 
-def monitor(sort="account", limit=30, direction="desc"):
-    now = time.time()
-    with _LOCK:
-        cached = _BOARD["rows"] if now - _BOARD["at"] < 60 else None
-        error = _BOARD["error"]
-    if cached is None:
+def short_address(address):
+    if not isinstance(address, str) or len(address) < 10:
+        return address or ""
+    return f"{address[:6]}…{address[-4:]}"
+
+
+def _optional_float(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def parse_positions(payload, address, name=""):
+    """Open positions from a public Hyperliquid clearinghouse snapshot."""
+    updated = beijing(payload.get("time")) if isinstance(payload, dict) and payload.get("time") else None
+    display = name.strip() if isinstance(name, str) else ""
+    rows = []
+    for item in (payload or {}).get("assetPositions") or []:
+        position = item.get("position") or {}
+        size = _optional_float(position.get("szi"))
+        if size is None or size == 0:
+            continue
+        entry = _optional_float(position.get("entryPx"))
+        mark = _optional_float(position.get("markPx"))
+        value = _optional_float(position.get("positionValue"))
+        mark_note = None
+        if mark is None and value is not None and size != 0:
+            mark = abs(value / size)
+            mark_note = "由公开持仓名义价值除以数量得到，不是另接的现货价"
+        leverage = position.get("leverage")
+        if isinstance(leverage, dict):
+            leverage = leverage.get("value")
+        rows.append({
+            "address": address,
+            "name": display,
+            "label": display or short_address(address),
+            "coin": position.get("coin"),
+            "side": "多" if size > 0 else "空",
+            "size": abs(size),
+            "entry": entry,
+            "mark": mark,
+            "mark_note": mark_note,
+            "leverage": _optional_float(leverage),
+            "unrealized_pnl": _optional_float(position.get("unrealizedPnl")),
+            "updated_at": updated,
+            "source": "Hyperliquid 公开持仓",
+        })
+    return rows
+
+
+def _split_addresses(value):
+    found = []
+    for part in str(value or "").split(","):
+        address = part.strip()
+        if len(address) == 42 and address.startswith("0x"):
+            try:
+                int(address[2:], 16)
+            except ValueError:
+                continue
+            if address not in found:
+                found.append(address)
+    return found[:12]
+
+
+def _positions_for(traders):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def one(trader):
+        address = trader.get("address")
+        if not address:
+            return []
         try:
-            response = requests.get(BOARD_URL, timeout=(4, 20), headers={"User-Agent": "quant-signal-lab-research"})
+            response = requests.post(
+                HL_INFO, json={"type": "clearinghouseState", "user": address}, timeout=(2, 4),
+                headers={"User-Agent": "quant-signal-lab-research"},
+            )
             response.raise_for_status()
-            cached = response.json()
-            error = None
+            payload = response.json()
+        except (requests.RequestException, ValueError):
+            return []
+        return parse_positions(payload, address, trader.get("name") or "")
+
+    if not traders:
+        return []
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        groups = list(pool.map(one, traders))
+    return [row for group in groups for row in group]
+
+
+def monitor(sort="account", limit=30, direction="desc", watched=""):
+    now = time.time()
+    stale = False
+    error = None
+    with _LOCK:
+        fresh = _BOARD["rows"] if _BOARD.get("rows") is not None and now - _BOARD.get("at", 0) < 60 else None
+        stored = _BOARD.get("rows")
+        stored_at = _BOARD.get("fetched_at")
+        stored_positions = list(_BOARD.get("positions") or [])
+    payload = fresh
+    if payload is None:
+        try:
+            response = requests.get(BOARD_URL, timeout=(3, 6), headers={"User-Agent": "quant-signal-lab-research"})
+            response.raise_for_status()
+            payload = response.json()
+            stored_at = beijing(now_ms())
             with _LOCK:
-                _BOARD.update(at=time.time(), rows=cached, error=None)
+                _BOARD.update(at=time.time(), rows=payload, error=None, fetched_at=stored_at)
         except (requests.RequestException, ValueError) as exc:
             error = f"Hyperliquid 公开排行榜暂时取不到：{type(exc).__name__}"
-            if cached is None:
-                return {"ok": False, "error": error, "rows": [],
-                        "notice": "这里只读公开数据，不是你的交易所账户，也不能下单。"}
+            payload = stored
+            stale = payload is not None
+    rows = parse_leaderboard(payload, sort, limit, direction) if isinstance(payload, dict) else []
+    if rows and not stale:
+        positions = _positions_for(rows[:3])
+        with _LOCK:
+            _BOARD["positions"] = positions
+    else:
+        positions = stored_positions
+    watched_positions = []
+    watched_errors = []
+    for address in _split_addresses(watched):
+        try:
+            response = requests.post(
+                HL_INFO, json={"type": "clearinghouseState", "user": address}, timeout=(2, 4),
+                headers={"User-Agent": "quant-signal-lab-research"},
+            )
+            response.raise_for_status()
+            watched_positions.extend(parse_positions(response.json(), address, ""))
+        except (requests.RequestException, ValueError) as exc:
+            watched_errors.append({"address": address, "error": type(exc).__name__})
     return {
-        "ok": error is None,
+        "ok": True,
+        "stale": stale,
         "error": error,
-        "source": "Hyperliquid 公开排行榜 stats-data.hyperliquid.xyz",
-        "notice": "只监控公开地址和公开排行榜，不是你的实盘账户，没有下单，也不需要交易密钥。",
-        "rows": parse_leaderboard(cached, sort, limit, direction),
-        "matched": len((cached or {}).get("leaderboardRows") or []),
+        "updated_at": stored_at,
+        "source": "Hyperliquid 公开持仓与排行榜",
+        "notice": "这里是 Hyperliquid 公开交易员持仓，不是你的 Bitget 账户，也不能下单。没有交易密钥。刷新公开榜不会改你保存在浏览器里的自选地址。",
+        "rows": rows,
+        "positions": positions,
+        "watched_positions": watched_positions,
+        "watched_errors": watched_errors,
+        "matched": len((payload or {}).get("leaderboardRows") or []) if isinstance(payload, dict) else 0,
     }
 
 
@@ -1006,23 +1205,17 @@ def public_wallet(address):
     except (requests.RequestException, ValueError) as exc:
         raise MarketDataError(f"公开账户暂时读不到：{type(exc).__name__}") from exc
     margin = payload.get("marginSummary") or {}
-    positions = []
-    for item in payload.get("assetPositions") or []:
-        position = item.get("position") or {}
-        positions.append({
-            "coin": position.get("coin"),
-            "size": position.get("szi"),
-            "entry": position.get("entryPx"),
-            "unrealized": position.get("unrealizedPnl"),
-            "leverage": (position.get("leverage") or {}).get("value"),
-        })
+    positions = parse_positions(payload, address, "")
     return {
         "ok": True,
         "address": address,
+        "name": "",
+        "label": short_address(address),
         "account_value": margin.get("accountValue"),
         "withdrawable": payload.get("withdrawable"),
         "positions": positions[:20],
-        "notice": "这是 Hyperliquid 上该地址的公开持仓快照，不是本网站用户的交易账户。",
+        "updated_at": beijing(payload.get("time")) if payload.get("time") else None,
+        "notice": "这是 Hyperliquid 上该地址的公开持仓快照，不是你的 Bitget 账户，也不会下单。",
     }
 
 
