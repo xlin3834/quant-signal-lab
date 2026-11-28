@@ -41,10 +41,14 @@ def main():
 
 
 def _warm_feed():
-    from workbench.research import get_feed
+    from workbench.research import get_feed, warm_monitor
 
     try:
         get_feed()
+    except Exception:
+        pass
+    try:
+        warm_monitor()
     except Exception:
         return
 

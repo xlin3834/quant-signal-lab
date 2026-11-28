@@ -1,18 +1,21 @@
 import { bindChart, drawChart } from "./chart.js";
 
-const PAGES = [
+const NAV = [
   ["overview", "市场总览"],
   ["charts", "行情图表"],
   ["scan", "市场扫描"],
   ["analysis", "专业分析"],
-  ["cross", "跨市场"],
-  ["calendar", "经济日历"],
   ["backtest", "回测记录"],
   ["catalog", "多市场目录"],
   ["alerts", "提醒中心"],
   ["monitor", "实盘监控"],
+];
+const EXTRA = [
+  ["cross", "跨市场"],
+  ["calendar", "经济日历"],
   ["settings", "指标设置"],
 ];
+const PAGES = [...NAV, ...EXTRA];
 
 const EXCHANGES = [
   ["binance", "币安永续"],
@@ -36,6 +39,8 @@ const state = {
   alertLog: [],
   lastRegime: {},
   favorites: [],
+  radarLoading: {},
+  monitorAttempts: 0,
 };
 
 const view = document.querySelector("#view");
@@ -114,12 +119,21 @@ function saveAlerts() {
 }
 
 function paintChrome() {
-  tabs.innerHTML = PAGES.map(([id, label]) => `<button class="tab ${state.page === id ? "active" : ""}" type="button" data-go="${id}">${label}</button>`).join("");
+  tabs.innerHTML = NAV.map(([id, label]) => `<button class="tab ${state.page === id ? "active" : ""}" type="button" data-go="${id}">${label}</button>`).join("");
+  document.querySelectorAll(".mobile-nav button").forEach((button) => {
+    const target = button.dataset.go;
+    const current = target === "scan" ? state.page === "scan" && state.scanFilter === "star" : state.page === target;
+    button.classList.toggle("active", Boolean(current));
+  });
   const item = state.quotes?.badge;
   badge.className = `badge ${item?.level || "delay"}`;
   badge.textContent = item?.text || "Bitget价格流 · 连接中";
   const latency = document.querySelector("#latency");
-  if (latency) latency.textContent = latencyBanner();
+  if (latency) {
+    const text = latencyBanner();
+    latency.textContent = text;
+    latency.hidden = !text;
+  }
   const titles = {
     overview: "Bitget · 核心资产 · 滚动24h",
     charts: `Bitget · ${state.chart.symbol} · ${state.chart.interval}`,
@@ -139,13 +153,14 @@ function paintChrome() {
 
 function paintWatch() {
   const box = document.querySelector("#watch");
+  if (!box) return;
   const assets = state.core?.assets || [
     {id: "BTC", name: "比特币", symbol: "BTCUSDT"},
     {id: "ETH", name: "以太坊", symbol: "ETHUSDT"},
     {id: "NVDA", name: "英伟达", symbol: "NVDA"},
     {id: "XAU", name: "现货黄金", symbol: "XAU/USD"},
   ];
-  const stars = (state.watchlist?.symbols || []).map((item) => `<button type="button" data-go="charts" data-symbol="${esc(item.symbol)}"><strong>${esc(item.symbol)}</strong><span class="tiny">${item.muted ? "提醒已暂停" : "已加入提醒"}</span></button>`).join("");
+  const stars = (state.watchlist?.symbols || []).map((item) => `<button type="button" data-go="charts" data-symbol="${esc(item.symbol)}"><strong>${esc(item.symbol)}</strong><span class="tiny">${item.muted ? "提醒已暂停" : "已加入提醒"} · ${stanceText(item.symbol)}</span></button>`).join("");
   box.innerHTML = assets.map((asset) => {
     const quote = asset.quote || quoteOf(asset.symbol);
     const status = asset.connected ? (quote?.freshness || "连接中") : "未接通";
@@ -212,16 +227,16 @@ const renderers = {
       const core = state.core || await api("/api/core");
       state.core = core;
       const asset = core.assets.find((item) => item.symbol === symbol || (symbol.startsWith("XAU") && item.id === "XAU") || symbol === "NVDA" && item.id === "NVDA");
-      return `${chartToolbar()}<div class="card notice">${esc(asset?.reason || "这个核心位没有已授权行情，图上不会画替代价格。")}</div>`;
+      return `<div class="chart-page">${chartToolbar()}<div class="card notice">${esc(asset?.reason || "这个核心位没有已授权行情，图上不会画替代价格。")}</div></div>`;
     }
     const [chart, radar] = await Promise.all([
       api(`/api/chart?symbol=${encodeURIComponent(symbol)}&interval=${state.chart.interval}`),
-      api(`/api/radar?symbol=${encodeURIComponent(symbol)}`).catch((error) => ({ok: false, error: error.message})),
+      api(`/api/radar?symbol=${encodeURIComponent(symbol)}`).catch((error) => ({ok: false, error: error.message, conclusion: {action: "无法判断", reason: error.message, score_long: null, score_short: null}})),
     ]);
     state.chart.payload = chart;
     state.radar[symbol] = radar;
-    if (!chart.ok) return `${chartToolbar()}<div class="card notice">${esc(chart.reason || chart.error)}</div>`;
-    return `${chartToolbar()}<div class="layout"><div class="card"><div id="chart-host"><canvas id="chart"></canvas></div><p class="hint">${esc(chart.product_label)} · 最近已收盘 ${esc(chart.last_closed || "—")} · ${chart.forming ? "含一根未收盘 K 线，只作预警" : "当前绘制到已收盘"}</p>${chart.banner ? `<p class="notice">${esc(chart.banner)}</p>` : ""}</div>${chartSide(chart, radar)}</div>`;
+    if (!chart.ok) return `<div class="chart-page">${chartToolbar()}<div class="card notice">${esc(chart.reason || chart.error)}</div></div>`;
+    return `<div class="chart-page">${chartToolbar()}<div class="layout"><div class="card chart-stage"><div id="chart-host"><canvas id="chart"></canvas></div><p class="hint">${esc(chart.product_label)} · 最近已收盘 ${esc(chart.last_closed || "—")} · ${chart.forming ? "含一根未收盘 K 线，只作预警" : "当前绘制到已收盘"}</p>${chart.banner ? `<p class="notice">${esc(chart.banner)}</p>` : ""}</div>${chartSide(chart, radar)}</div></div>`;
   },
   async scan() {
     const product = state.scanProduct || "crypto_perp";
@@ -232,12 +247,29 @@ const renderers = {
     const intervals = ["5m", "15m", "30m", "1H", "4H", "1D"];
     const filters = [["all", "全部"], ["up", "最近上穿"], ["down", "最近下穿"], ["none", "暂无交叉"], ["star", "仅看自选"]];
     let rows = data.rows || [];
-    if (filter === "star") rows = rows.filter((row) => state.favorites.includes(row.symbol));
+    state.scanRows = rows;
+    if (filter === "star") {
+      const ranked = new Set(rows.map((row) => row.symbol));
+      const extra = (state.watchlist?.symbols || []).filter((item) => !ranked.has(item.symbol)).map((item) => ({
+        symbol: item.symbol,
+        base: item.symbol,
+        price: null,
+        change: null,
+        turnover: null,
+        last_cross: "暂无交叉",
+        last_cross_time: "",
+        kline_state: "不在当前成交额前 20",
+        stance: CORE_PERPS.includes(item.symbol)
+          ? {scored: false, pending: true, reason: "正在读取已收盘分数。读不到之前不会写成做多或做空。"}
+          : {scored: false, pending: false, reason: "只给 BTC、ETH、SOL、BNB 打分。这一行不编造方向或分数。"},
+      }));
+      rows = rows.filter((row) => isStarred(row.symbol)).concat(extra);
+    }
     return `<div class="card"><h2>市场扫描</h2><p class="hint">${esc(data.note || "")} 当前 ${rows.length} 个。成交额单位 ${esc(data.turnover_unit || "未混排")}。</p><div class="row">${products.map(([id, label]) => `<button class="chip ${product === id ? "active" : ""}" data-scan-product="${id}" type="button">${label}</button>`).join("")}</div><div class="row">${intervals.map((item) => `<button class="chip ${interval === item ? "active" : ""}" data-scan-interval="${item}" type="button">${item}</button>`).join("")}${filters.map(([id, label]) => `<button class="chip ${filter === id ? "active" : ""}" data-scan-filter="${id}" type="button">${label}</button>`).join("")}</div>${scanTable(rows)}${(data.unranked || []).length ? `<p class="tiny">未排名 ${data.unranked.length} 个：${esc(data.unranked[0].rank_reason || "")}</p>` : ""}</div>`;
   },
   async analysis() {
     const symbol = CORE_PERPS.includes(state.chart.symbol) ? state.chart.symbol : "BTCUSDT";
-    return `<div class="card"><h2>专业分析</h2><p class="hint">只分析已收盘 K 线。点按钮后才计算，不会自动跑长回测。分数不是胜率。</p><div class="row"><select id="an-symbol">${CORE_PERPS.map((item) => `<option ${item === symbol ? "selected" : ""}>${item}</option>`).join("")}</select><button class="primary" data-act="analyze" type="button">分析已收盘行情</button><button class="ghost" data-act="macro" type="button">读取宏观与斐波那契</button></div><div id="analysis-out" class="stack"></div></div>`;
+    return `<div class="card"><h2>专业分析</h2><p class="hint">只分析已收盘 K 线。点按钮后才计算，不会自动跑长回测。分数不是胜率。</p><div class="row"><select id="an-symbol">${CORE_PERPS.map((item) => `<option ${item === symbol ? "selected" : ""}>${item}</option>`).join("")}</select><button class="primary" data-act="analyze" type="button">分析已收盘行情</button><button class="ghost" data-act="macro" type="button">读取宏观与斐波那契</button></div><div id="analysis-out" class="stack"><div class="empty"><h3>还没有分析结果</h3><p>选择 BTC、ETH、SOL 或 BNB，再点「分析已收盘行情」。未收盘 K 线不会被写成正式的做多或做空。</p><p class="tiny">宏观与斐波那契是另一项阅读，不代替上面的已收盘评分。</p></div></div></div>`;
   },
   async cross() {
     return `<div class="card"><h2>跨市场</h2><p class="hint">这一页比较两条已经接通的行情，不是产品目录。相关不是因果，页面不估计资金流。</p><div class="row"><select id="cross-left">${crossOptions("BTCUSDT")}</select><select id="cross-right">${crossOptions("ETHUSDT")}</select><select id="cross-interval"><option>1H</option><option>15m</option><option>4H</option><option>1D</option></select><button class="primary" data-act="cross" type="button">计算已收盘相关</button></div><div id="cross-out"></div></div>`;
@@ -253,7 +285,7 @@ const renderers = {
     return `<div class="card"><h2>风险与仓位</h2><p class="hint">参考计算器。费用和滑点是假设值，不含资金费和借币息，不会读取真实账户，也不会下单。</p><div class="form-grid">${riskFields()}</div><div class="row"><button class="primary" data-act="risk" type="button">计算参考仓位</button></div><div id="risk-out"></div></div>`;
   },
   async backtest() {
-    return `<div class="card"><h2>回测与记录</h2><div class="notice">样本内 70% 与样本外 30% 按时间切开。正式候选用已收盘 K 线，下一根开盘才模拟成交，同一根先处理止损。没有搜索最优参数，也不会把演示收益写进来。</div><div class="row"><select id="bt-symbol"><option>BTCUSDT</option><option>ETHUSDT</option></select><button class="primary" data-act="backtest" type="button">运行短样本回测</button><button class="ghost" data-act="archive" type="button">查看 2026-11-26 存档</button></div><div id="bt-out" class="stack"></div></div>`;
+    return `<div class="card"><h2>回测与记录</h2><div class="notice">样本内 70% 与样本外 30% 按时间切开。正式候选用已收盘 K 线，下一根开盘才模拟成交，同一根先处理止损。没有搜索最优参数，也不会把演示收益写进来。</div><div class="row"><select id="bt-symbol"><option>BTCUSDT</option><option>ETHUSDT</option></select><button class="primary" data-act="backtest" type="button">运行短样本回测</button><button class="ghost" data-act="archive" type="button">查看 2026-11-26 存档</button></div><div id="bt-out" class="stack"><div class="empty"><h3>还没有回测结果</h3><p>只对 BTCUSDT 和 ETHUSDT 跑短样本。点「运行短样本回测」开始。需要对照时再看 2026-11-26 存档。</p><p class="tiny">这一步不会自动重复，也不会填入演示收益。</p></div></div></div>`;
   },
   async catalog() {
     const data = await api(`/api/directory?q=${encodeURIComponent(state.catalog.query)}&product=${encodeURIComponent(state.catalog.product)}&exchange=${state.catalog.exchange}&sort=name&page=${state.catalog.page}&page_size=40`);
@@ -264,17 +296,37 @@ const renderers = {
     const status = await api("/api/alerts/status");
     const list = state.watchlist?.symbols || [];
     const channels = ["in_app", "browser", "email", "telegram_channel", "telegram_dm", "sound"];
-    return `<div class="card"><h2>提醒中心</h2><div class="notice">${esc(status.runtime.reason)} ${esc(status.runtime.always_on_note)}</div><p class="hint">主动提醒只有六种收盘确认的 EMA 与布林中轨交叉。收藏的品种自动进入监控。EMA120 只报告穿越方向，不是开仓指令。</p><h3>自选监控</h3>${list.length ? list.map((item) => `<div class="row"><span>${esc(item.symbol)}</span><span class="tiny">${item.muted ? "已暂停" : "提醒开"} · ${(item.timeframes || []).join(" ")}</span><button class="ghost" data-mute="${esc(item.symbol)}" type="button">${item.muted ? "恢复" : "暂停"}</button></div>`).join("") : `<p class="tiny">还没有收藏。在总览、扫描、图表或目录点星号就会加入。</p>`}<h3>渠道</h3>${channels.map((name) => `<div class="row"><span>${name}</span><span class="tiny">${status.channels.enabled?.[name] ? "已开启" : "已关闭"} · ${status.channels[name]?.configured ? "已配置" : "未配置"}</span><button class="ghost" data-channel-toggle="${name}" data-enabled="${status.channels.enabled?.[name] ? "0" : "1"}" type="button">${status.channels.enabled?.[name] ? "关闭" : "开启"}</button><button class="ghost" data-test-channel="${name}" type="button">测试</button></div>`).join("")}<div id="channel-out" class="tiny"></div><p class="tiny">持仓变化是单独一类，默认关闭，不和六种指标交叉一起推送。</p><details><summary>已归档的旧提醒（默认不显示、不推送）</summary><p class="tiny">EMA9×EMA20、80 分候选、趋势切换、RSI 背驰、支撑压力触达已停用。</p></details><p class="tiny">邮箱需要 QSL_SMTP_HOST、QSL_SMTP_FROM、QSL_ALERT_EMAIL_TO。Telegram 频道需要 QSL_TELEGRAM_BOT_TOKEN 和 QSL_TELEGRAM_CHANNEL_ID。私聊再加 QSL_TELEGRAM_DM_CHAT_ID。这些只放服务端环境变量。</p></div>`;
+    const copy = status.channels.copy || {};
+    const watch = list.length ? list.map((item) => `<div class="row"><button class="star ${isStarred(item.symbol) ? "on" : ""}" data-fav="${esc(item.symbol)}" type="button" aria-label="自选">★</button><span>${esc(item.symbol)}</span><span data-stance="${esc(item.symbol)}">${stanceHtml(item.symbol)}</span><span class="tiny">${item.muted ? "已暂停" : "提醒开"} · ${(item.timeframes || []).join(" ")}</span><button class="ghost" data-mute="${esc(item.symbol)}" type="button">${item.muted ? "恢复" : "暂停"}</button></div>`).join("") : `<div class="empty"><h3>还没有自选</h3><p>在市场扫描、行情图表或总览点星号。这里和扫描表用的是同一份自选。</p></div>`;
+    const channelRows = channels.map((name) => {
+      const label = copy[name]?.label || channelLabel(name);
+      const detail = copy[name]?.detail || "";
+      const enabled = Boolean(status.channels.enabled?.[name]);
+      const ready = Boolean(status.channels[name]?.configured);
+      return `<div class="row"><span>${esc(label)}</span><span class="tiny">${enabled ? "已开启" : "已关闭"} · ${ready ? "可以发送" : "还没配好"} ${esc(detail)}</span><button class="ghost" data-channel-toggle="${name}" data-enabled="${enabled ? "0" : "1"}" type="button">${enabled ? "关闭" : "开启"}</button><button class="ghost" data-test-channel="${name}" type="button">发一条测试</button></div>`;
+    }).join("");
+    return `<div class="card"><h2>提醒中心</h2><div class="notice">${esc(status.runtime.user_note || status.runtime.reason)}</div><p class="hint">主动提醒只有六种收盘确认的 EMA 与布林中轨交叉。自选里的品种会进入监控。EMA120 只报告穿越方向，不是开仓指令。</p><h3>自选</h3>${watch}<h3>通知方式</h3>${channelRows}<div id="channel-out" class="tiny"></div><p class="tiny">持仓变化是单独一类，默认关闭，不和六种指标交叉一起推送。</p><details><summary>已停用的旧提醒</summary><p class="tiny">EMA9×EMA20、80 分候选、趋势切换、RSI 背驰、支撑压力触达已停用，不会再推送。</p></details><details><summary>给管理员的发送配置</summary><p class="tiny">${esc(status.runtime.always_on_note || "")}</p><p class="tiny">检查命令：${esc(status.runtime.always_on_command || "")}</p><p class="tiny">邮箱需要 QSL_SMTP_HOST、QSL_SMTP_FROM、QSL_ALERT_EMAIL_TO。Telegram 频道需要 QSL_TELEGRAM_BOT_TOKEN 和 QSL_TELEGRAM_CHANNEL_ID。私聊再加 QSL_TELEGRAM_DM_CHAT_ID。这些只放服务端环境变量。</p></details></div>`;
   },
   async monitor() {
-    const watched = JSON.parse(localStorage.getItem("signal-lab-wallets") || "[]");
+    const watched = readWallets();
     const data = await api(`/api/monitor?sort=${state.market.board || "month"}&limit=12&watched=${encodeURIComponent(watched.join(","))}`);
-    const positions = [...(data.watched_positions || []), ...(data.positions || [])];
-    return `<div class="card"><h2>实盘监控</h2><div class="notice">${esc(data.notice || "")}</div><p class="hint">${esc(data.source || "")}${data.stale ? " · 榜单暂时刷新失败，下面使用上一次成功的公开快照" : ""} ${data.updated_at ? `· 更新 ${esc(data.updated_at)}` : ""} ${data.error ? `· ${esc(data.error)}` : ""}</p><p class="tiny">${esc(data.account_value_note || "")}</p><h3>公开持仓</h3>${positions.length ? positionTable(positions) : `<p class="hint">已查询成交活跃地址的官方永续账户。官方返回当前没有持仓，没有编造仓位。</p>`}<div class="row"><input id="wallet" class="search" placeholder="0x 公开地址，不要填私钥" maxlength="42"><button class="primary" data-act="wallet" type="button">加入自选并读取持仓</button></div><p class="tiny">自选地址存在这个浏览器里。刷新公开榜不会清掉它们。${esc((watched || []).join("、"))}</p><div id="wallet-out"></div><details><summary>公开榜账户价值（不是持仓）</summary><div class="row"><select id="board-sort"><option value="month" ${state.market.board === "month" ? "selected" : ""}>30日收益率</option><option value="week">周收益率</option><option value="day">日收益率</option><option value="account">榜单账户价值</option><option value="day_vlm">日成交额</option></select><input id="board-q" class="search" placeholder="按公开昵称、备注或地址搜索" value="${esc(state.boardQuery || "")}"><button class="ghost" data-act="board" type="button">刷新公开榜</button></div><table><thead><tr><th>公开昵称或地址</th><th>30日收益</th><th>榜单账户价值</th><th>永续权益</th><th>最大回撤</th><th>交易次数</th><th>胜率</th></tr></thead><tbody>${(data.rows || []).filter((row) => {
+    state.monitorPending = Boolean(data.positions_pending);
+    const positions = [...(data.watched_positions || []), ...(data.positions || [])].map((row) => ({...row, venue: row.venue || "Hyperliquid"}));
+    const positionBody = positions.length
+      ? positionTable(positions)
+      : data.positions_pending
+        ? `<p class="hint">正在读取 Hyperliquid 公开持仓。页面先打开，不会一直等到超时。读完后会再刷新一次。</p>`
+        : data.position_error
+          ? `<p class="hint">${esc(data.position_error)} 没有把这次失败写成「没有持仓」。</p>`
+          : data.error && !(data.rows || []).length
+            ? `<p class="hint">${esc(data.error)} 没有把这次失败写成「没有持仓」。</p>`
+            : `<p class="hint">已查询公开永续账户。官方返回当前没有持仓，没有编造仓位。</p>`;
+    const board = (data.rows || []).filter((row) => {
       const query = (state.boardQuery || "").trim().toLowerCase();
-      const remark = (JSON.parse(localStorage.getItem("signal-lab-wallet-notes") || "{}")[row.address] || "");
-      return !query || `${row.name || ""} ${row.address || ""} ${remark}`.toLowerCase().includes(query);
-    }).map((row) => `<tr><td>${esc(row.name || "未公开昵称")}<div class="tiny">${esc(shortAddr(row.address))} <button class="ghost" data-copy="${esc(row.address)}" type="button">复制地址</button></div></td><td>${pct(row.month_roi)}</td><td>${fmt(row.account_value, 0)}</td><td>${fmt(row.perp_account_value, 0)}</td><td>${row.max_drawdown == null ? "暂无数据" : fmt(row.max_drawdown, 2)}</td><td>${row.trade_count == null ? "暂无数据" : esc(row.trade_count)}</td><td>${row.win_rate == null ? "暂无数据" : pct(row.win_rate)}</td></tr>`).join("") || "<tr><td colspan='7'>榜单暂时没有数据。</td></tr>"}</tbody></table></details></div>`;
+      const remark = walletNote(row.address);
+      return !query || `${row.display_name || ""} ${row.name || ""} ${row.address || ""} ${remark}`.toLowerCase().includes(query);
+    }).map((row) => `<tr><td><span class="pill venue-pill">Hyperliquid</span> <strong data-nick="${esc(row.address)}" data-display="${esc(row.display_name || "")}">${esc(nickname(row))}</strong><div class="tiny">${esc(shortAddr(row.address))} <button class="ghost" data-copy="${esc(row.address)}" type="button">复制地址</button></div><label class="tiny">备注<input data-note="${esc(row.address)}" type="text" value="${esc(walletNote(row.address))}" placeholder="没有公开昵称时显示"></label></td><td>${pct(row.month_roi)}</td><td>${fmt(row.account_value, 0)}</td><td>${fmt(row.perp_account_value, 0)}</td><td>${row.max_drawdown == null ? "暂无数据" : fmt(row.max_drawdown, 2)}</td><td>${row.trade_count == null ? "暂无数据" : esc(row.trade_count)}</td><td>${row.win_rate == null ? "暂无数据" : pct(row.win_rate)}</td></tr>`).join("");
+    return `<div class="card"><h2>实盘监控</h2><section class="venue-hl"><h3>Hyperliquid 公开持仓</h3><p>${esc(data.notice || "这些仓位来自 Hyperliquid 公开数据，不是 Bitget 账户，也不能下单。")}</p><p class="tiny">和本站的 Bitget 行情分开。这里没有 Bitget 账户仓位。</p><p class="hint">${esc(data.source || "Hyperliquid")}${data.stale ? " · 榜单暂时刷新失败，下面使用上一次成功的公开快照" : ""} ${data.updated_at ? `· 更新 ${esc(data.updated_at)}` : ""} ${data.error ? `· ${esc(data.error)}` : ""}</p>${positionBody}</section><div class="row"><input id="wallet" class="search" placeholder="0x 公开地址，不要填私钥" maxlength="42"><button class="primary" data-act="wallet" type="button">加入自选并读取持仓</button></div><p class="tiny">自选地址存在这个浏览器里。刷新公开榜不会清掉它们。${esc((watched || []).join("、"))}</p><p class="tiny">${esc(data.account_value_note || "")}</p><div id="wallet-out"></div><details><summary>Hyperliquid 公开榜账户价值（不是持仓，也不是 Bitget 余额）</summary><div class="row"><select id="board-sort"><option value="month" ${state.market.board === "month" ? "selected" : ""}>30日收益率</option><option value="week">周收益率</option><option value="day">日收益率</option><option value="account">榜单账户价值</option><option value="day_vlm">日成交额</option></select><input id="board-q" class="search" placeholder="按公开昵称、备注或地址搜索" value="${esc(state.boardQuery || "")}"><button class="ghost" data-act="board" type="button">刷新公开榜</button></div><div class="table-scroll"><table><thead><tr><th>公开昵称或地址</th><th>30日收益</th><th>榜单账户价值</th><th>永续权益</th><th>最大回撤</th><th>交易次数</th><th>胜率</th></tr></thead><tbody>${board || "<tr><td colspan='7'>榜单暂时没有数据。</td></tr>"}</tbody></table></div></details></div>`;
   },
   async settings() {
     const data = await api("/api/settings");
@@ -301,7 +353,12 @@ function latencyLine(quote) {
 }
 
 function latencyBanner() {
-  return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"].map((symbol) => `${symbol} ${latencyLine(quoteOf(symbol))}`).join("\n");
+  const parts = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"].map((symbol) => {
+    const quote = quoteOf(symbol);
+    if (!quote || !quote.samples) return "";
+    return `${symbol} ${msText(quote.transport_ms)}/${msText(quote.median_ms)}/${msText(quote.p95_ms)} ms`;
+  }).filter(Boolean);
+  return parts.length ? `本连接 ${parts.join(" · ")}` : "";
 }
 
 function filters() {
@@ -312,7 +369,7 @@ function filters() {
 
 function rowsTable(rows, scan = false) {
   if (!rows?.length) return `<p class="hint">没有符合条件的行。</p>`;
-  return `<div class="list"><div class="head-row"><span></span><span>产品</span><span>24h 成交额</span><span>涨跌</span><span>新鲜度 / 价格</span></div>${rows.map((row) => `<div class="item"><button class="star ${state.favorites.includes(row.symbol) ? "on" : ""}" data-fav="${esc(row.symbol)}" type="button">★</button><div><div class="name">${esc(row.base || row.symbol)}</div><div class="meta">${esc(row.symbol)} · ${esc(row.product_label)}</div><div class="tiny">来源 ${esc(row.source || row.product_label || "未标注")} · 更新 ${esc(row.updated_label || "无")} · 连接 ${esc(row.connection || row.freshness || "未知")}</div>${row.note ? `<div class="tiny">${esc(row.note)}</div>` : ""}</div><div>${turnover(row.turnover)}</div><div>${change(row.change)}</div><div><div data-live="${esc(row.symbol)}" data-field="price">${priceText(row.symbol, row)}</div><div class="tiny"><span data-live="${esc(row.symbol)}" data-field="fresh">${pill(row.freshness)}</span> · ${esc(row.kline_status || "")}${scan ? ` · ${esc(state.radar[row.symbol]?.conclusion?.action || "无法判断")}` : ""}</div></div></div>`).join("")}</div>`;
+  return `<div class="list"><div class="head-row"><span></span><span>产品</span><span>24h 成交额</span><span>涨跌</span><span>新鲜度 / 价格</span></div>${rows.map((row) => `<div class="item"><button class="star ${isStarred(row.symbol) ? "on" : ""}" data-fav="${esc(row.symbol)}" type="button">★</button><div><div class="name">${esc(row.base || row.symbol)}</div><div class="meta">${esc(row.symbol)} · ${esc(row.product_label)}</div><div class="tiny">来源 ${esc(row.source || row.product_label || "未标注")} · 更新 ${esc(row.updated_label || "无")} · 连接 ${esc(row.connection || row.freshness || "未知")}</div>${row.note ? `<div class="tiny">${esc(row.note)}</div>` : ""}${isStarred(row.symbol) ? `<div data-stance="${esc(row.symbol)}">${stanceHtml(row.symbol)}</div>` : ""}</div><div>${turnover(row.turnover)}</div><div>${change(row.change)}</div><div><div data-live="${esc(row.symbol)}" data-field="price">${priceText(row.symbol, row)}</div><div class="tiny"><span data-live="${esc(row.symbol)}" data-field="fresh">${pill(row.freshness)}</span> · ${esc(row.kline_status || "")}${scan ? ` · ${esc(state.radar[row.symbol]?.conclusion?.action || "无法判断")}` : ""}</div></div></div>`).join("")}</div>`;
 }
 
 function summaryLine(summary) {
@@ -356,13 +413,13 @@ function chartToolbar() {
   const intervals = ["1m", "5m", "15m", "30m", "1H", "4H", "1D"];
   const layers = [["ema7", "EMA7 黄"], ["ema10", "EMA10 蓝"], ["ema120", "EMA120 紫"], ["boll", "BOLL(18,2)"]];
   const colors = [["ema7Color", "EMA7"], ["ema10Color", "EMA10"], ["ema120Color", "EMA120"], ["bollColor", "中轨"]];
-  return `<div class="card stack"><div class="row"><input id="chart-symbol" class="search" value="${esc(state.chart.symbol)}" placeholder="BTCUSDT、ETHUSDT、SOLUSDT、BNBUSDT、XAUUSDT"><button class="ghost" data-act="chart-symbol" type="button">打开</button><button class="star ${state.favorites.includes(state.chart.symbol) ? "on" : ""}" data-fav="${esc(state.chart.symbol)}" type="button">★</button></div><div class="row">${intervals.map((item) => `<button class="chip ${state.chart.interval === item ? "active" : ""}" data-interval="${item}" type="button">${item}</button>`).join("")}</div><div class="row">${layers.map(([id, label]) => `<button class="chip ${state.chart.layers[id] ? "active" : ""}" data-layer="${id}" type="button">${label}</button>`).join("")}${colors.map(([id, label]) => `<label class="tiny">${label}<input type="color" data-color="${id}" value="${state.chart.layers[id] || "#ffffff"}"></label>`).join("")}${[["ema7Width", "EMA7粗细"], ["ema10Width", "EMA10粗细"], ["ema120Width", "EMA120粗细"], ["bollWidth", "布林粗细"]].map(([id, label]) => `<label class="tiny">${label}<input type="number" min="1" max="4" step="0.2" data-width="${id}" value="${state.chart.layers[id] || 1.4}"></label>`).join("")}<button class="ghost" data-act="fullscreen" type="button">全屏</button><button class="ghost" data-act="reset-chart" type="button">恢复默认</button></div><p id="hover" class="tiny">滚轮缩放。悬停显示收盘、EMA7、EMA10、EMA120 和布林中轨。按住 Shift 点击可记一条手动支撑/压力。</p><p class="tiny">主图默认 EMA7、EMA10、EMA120 和 BOLL(18,2)。中轨是收盘价的 18 周期简单均线。EMA120 穿越只报告方向，不是开仓指令。</p></div>`;
+  return `<div class="card stack"><div class="row"><input id="chart-symbol" class="search" value="${esc(state.chart.symbol)}" placeholder="BTCUSDT、ETHUSDT、SOLUSDT、BNBUSDT、XAUUSDT"><button class="ghost" data-act="chart-symbol" type="button">打开</button><button class="star ${isStarred(state.chart.symbol) ? "on" : ""}" data-fav="${esc(state.chart.symbol)}" type="button">★</button></div><div class="row">${intervals.map((item) => `<button class="chip ${state.chart.interval === item ? "active" : ""}" data-interval="${item}" type="button">${item}</button>`).join("")}</div><div class="row">${layers.map(([id, label]) => `<button class="chip ${state.chart.layers[id] ? "active" : ""}" data-layer="${id}" type="button">${label}</button>`).join("")}${colors.map(([id, label]) => `<label class="tiny">${label}<input type="color" data-color="${id}" value="${state.chart.layers[id] || "#ffffff"}"></label>`).join("")}${[["ema7Width", "EMA7粗细"], ["ema10Width", "EMA10粗细"], ["ema120Width", "EMA120粗细"], ["bollWidth", "布林粗细"]].map(([id, label]) => `<label class="tiny">${label}<input type="number" min="1" max="4" step="0.2" data-width="${id}" value="${state.chart.layers[id] || 1.4}"></label>`).join("")}<button class="ghost" data-act="fullscreen" type="button">全屏</button><button class="ghost" data-act="reset-chart" type="button">恢复默认</button></div><p id="hover" class="tiny">滚轮缩放。悬停显示收盘、EMA7、EMA10、EMA120 和布林中轨。按住 Shift 点击可记一条手动支撑/压力。</p><p class="tiny">主图默认 EMA7、EMA10、EMA120 和 BOLL(18,2)。中轨是收盘价的 18 周期简单均线。EMA120 穿越只报告方向，不是开仓指令。</p></div>`;
 }
 
 function chartSide(chart, radar) {
   const env = radar?.environment;
   const conclusion = radar?.conclusion;
-  return `<aside class="card stack">${conclusion ? `<div class="name ${conclusion.action === "做多" ? "up" : conclusion.action === "做空" ? "down" : ""}">${esc(conclusion.action)}</div><p>多 ${fmt(conclusion.score_long, 0)} / 空 ${fmt(conclusion.score_short, 0)} · ${esc(conclusion.status || "")}</p><p class="tiny">${esc(conclusion.reason || "")}</p>` : ""}<h3>信号实验室 7.1 趋势工作台</h3><p>${esc(env ? `${env.regime} · ${env.reason}` : radar?.error || "环境建议尚未算出")}</p><p class="tiny">建议研究 ${esc(env?.suggestion || "—")}。不会自动切换。</p><p>正式状态：${esc(radar?.grade || "—")}</p><p class="tiny">${esc(radar?.pause_note || radar?.forming_note || "")}</p><h3>布林动态止盈止损</h3><p class="tiny">未收盘 K 线不能确认交易信号。下面的价位来自已收盘计划，只收研究参考，不会发单。</p><p>${esc(radar?.plan ? `方案 ${radar.plan.scheme} · 止损 ${fmt(radar.plan.stop, 4)} · 目标 ${fmt(radar.plan.target1, 4)}` : "当前没有可展示的已收盘计划。")}</p><p class="tiny">${esc(chart.warning || "")}</p><p class="tiny">${esc(chart.outcome_note || "")}</p></aside>`;
+  return `<aside class="card stack">${conclusion ? `<div class="name ${conclusion.action === "做多" ? "up" : conclusion.action === "做空" ? "down" : ""}">${esc(conclusion.action)}</div><p>多 ${fmt(conclusion.score_long, 0)} / 空 ${fmt(conclusion.score_short, 0)} · ${esc(conclusion.status || "")}</p><p class="tiny">${esc(conclusion.reason || "")}</p>` : ""}<h3>信号实验室 8.0</h3><p>${esc(env ? `${env.regime} · ${env.reason}` : radar?.error || "环境建议尚未算出")}</p><p class="tiny">建议研究 ${esc(env?.suggestion || "—")}。不会自动切换。</p><p>正式状态：${esc(radar?.grade || "—")}</p><p class="tiny">${esc(radar?.pause_note || radar?.forming_note || "")}</p><h3>布林动态止盈止损</h3><p class="tiny">未收盘 K 线不能确认交易信号。下面的价位来自已收盘计划，只收研究参考，不会发单。</p><p>${esc(radar?.plan ? `方案 ${radar.plan.scheme} · 止损 ${fmt(radar.plan.stop, 4)} · 目标 ${fmt(radar.plan.target1, 4)}` : "当前没有可展示的已收盘计划。")}</p><p class="tiny">${esc(chart.warning || "")}</p><p class="tiny">${esc(chart.outcome_note || "")}</p></aside>`;
 }
 
 function crossOptions(selected) {
@@ -388,7 +445,12 @@ function shortAddr(value) {
 
 function positionTable(rows) {
   if (!rows?.length) return `<p class="hint">公开快照里没有持仓。不会编造仓位。</p>`;
-  return `<table><thead><tr><th>名称或地址</th><th>币</th><th>方向</th><th>数量</th><th>开仓价</th><th>标记或折算价</th><th>杠杆</th><th>未实现盈亏</th><th>更新</th></tr></thead><tbody>${rows.map((row) => `<tr><td>${esc(row.label || row.name || shortAddr(row.address))}</td><td>${esc(row.coin)}</td><td class="${row.side === "多" ? "up" : "down"}">${esc(row.side)}</td><td>${fmt(row.size, 4)}</td><td>${fmt(row.entry, 4)}</td><td>${fmt(row.mark, 4)}</td><td>${esc(row.leverage ?? "—")}</td><td>${fmt(row.unrealized_pnl, 2)}</td><td>${esc(row.updated_at || "无")}</td></tr>`).join("")}</tbody></table>`;
+  return `<div class="table-scroll"><table class="hl-positions"><thead><tr><th>场所</th><th>名称或地址</th><th>币</th><th>方向</th><th>数量</th><th>开仓价</th><th>标记或折算价</th><th>杠杆</th><th>未实现盈亏</th><th>更新</th></tr></thead><tbody>${rows.map((row) => {
+    const shown = nickname(row);
+    const short = shortAddr(row.address);
+    const sub = shown === short ? "" : `<div class="tiny">${esc(short)}</div>`;
+    return `<tr><td><span class="pill venue-pill">Hyperliquid 公开</span><div class="tiny">不是 Bitget 账户</div></td><td><strong data-nick="${esc(row.address)}" data-display="${esc(row.display_name || "")}">${esc(shown)}</strong>${sub}</td><td>${esc(row.coin)}</td><td class="${row.side === "多" ? "up" : "down"}">${esc(row.side)}</td><td>${fmt(row.size, 4)}</td><td>${fmt(row.entry, 4)}</td><td>${fmt(row.mark, 4)}</td><td>${esc(row.leverage ?? "—")}</td><td>${fmt(row.unrealized_pnl, 2)}</td><td>${esc(row.updated_at || "无")}</td></tr>`;
+  }).join("")}</tbody></table></div>`;
 }
 
 function settingsPage(data) {
@@ -559,6 +621,21 @@ function readSettingsForm() {
 }
 
 async function afterRender(page) {
+  if (page === "scan" || page === "alerts" || page === "overview") {
+    const symbols = [
+      ...(state.watchlist?.symbols || []).map((item) => item.symbol),
+      ...(state.scanRows || []).map((row) => row.symbol),
+      ...CORE_PERPS,
+    ];
+    refreshStances(symbols);
+  }
+  if (page === "monitor" && state.monitorPending && state.monitorAttempts < 3) {
+    state.monitorAttempts += 1;
+    setTimeout(() => {
+      if (state.page === "monitor") show("monitor");
+    }, 2000);
+  }
+  if (page === "monitor" && !state.monitorPending) state.monitorAttempts = 0;
   if (page === "charts") {
     const canvas = document.querySelector("#chart");
     const payload = state.chart.payload;
@@ -667,7 +744,7 @@ document.body.addEventListener("click", async (event) => {
   const favorite = event.target.closest("[data-fav]");
   if (favorite) {
     const symbol = favorite.dataset.fav;
-    const action = state.favorites.includes(symbol) ? "remove" : "add";
+    const action = isStarred(symbol) ? "remove" : "add";
     const data = await api("/api/watchlist", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({action, symbol})});
     applyWatchlist(data);
     show(state.page);
@@ -858,6 +935,16 @@ document.body.addEventListener("change", (event) => {
 });
 
 document.body.addEventListener("input", (event) => {
+  const note = event.target.closest("[data-note]");
+  if (note) {
+    const notes = JSON.parse(localStorage.getItem("signal-lab-wallet-notes") || "{}");
+    const value = note.value.trim();
+    if (value) notes[note.dataset.note] = value;
+    else delete notes[note.dataset.note];
+    localStorage.setItem("signal-lab-wallet-notes", JSON.stringify(notes));
+    paintNicknames();
+    return;
+  }
   const color = event.target.closest("[data-color]");
   const widthInput = event.target.closest("[data-width]");
   if (!color && !widthInput) return;
@@ -875,17 +962,157 @@ function applyWatchlist(data) {
   state.favorites = (data.symbols || []).map((item) => item.symbol);
 }
 
+function isStarred(symbol) {
+  const key = String(symbol || "").toUpperCase();
+  return (state.favorites || []).some((item) => String(item).toUpperCase() === key);
+}
+
+function readWallets() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("signal-lab-wallets") || "[]");
+    return Array.isArray(saved) ? saved : [];
+  } catch (error) {
+    return [];
+  }
+}
+
+function walletNote(address) {
+  try {
+    return String(JSON.parse(localStorage.getItem("signal-lab-wallet-notes") || "{}")[address] || "").trim();
+  } catch (error) {
+    return "";
+  }
+}
+
+function nickname(row) {
+  const display = String(row?.display_name || "").trim();
+  if (display) return display;
+  if (row?.name_source === "displayName" && String(row?.name || "").trim()) return String(row.name).trim();
+  const note = String(row?.note || walletNote(row?.address) || "").trim();
+  if (note) return note;
+  const short = shortAddr(row?.address);
+  if (short && short !== "—") return short;
+  const fallback = String(row?.label || "").trim();
+  return fallback || "未公开昵称";
+}
+
+function paintNicknames() {
+  document.querySelectorAll("[data-nick]").forEach((node) => {
+    node.textContent = nickname({address: node.dataset.nick, display_name: node.dataset.display || ""});
+  });
+}
+
+function channelLabel(name) {
+  return {
+    in_app: "页面里",
+    browser: "浏览器通知",
+    email: "邮箱",
+    telegram_channel: "Telegram 频道",
+    telegram_dm: "Telegram 私聊",
+    sound: "提示音",
+  }[name] || "通知";
+}
+
+function shanghaiTime(value) {
+  if (value == null || value === "") return "";
+  const text = String(value);
+  if (!/^\d{12,}$/.test(text)) return text;
+  const date = new Date(Number(text));
+  if (Number.isNaN(date.getTime())) return text;
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date);
+}
+
+function stanceRecord(symbol, preset) {
+  const radar = state.radar[symbol];
+  const conclusion = radar?.conclusion;
+  if (conclusion && conclusion.score_long != null && conclusion.score_short != null) {
+    return {
+      scored: true,
+      lean: conclusion.action,
+      score_long: conclusion.score_long,
+      score_short: conclusion.score_short,
+      reason: conclusion.reason || "",
+    };
+  }
+  if (conclusion) return {scored: false, reason: conclusion.reason || "已收盘数据不足，不能给出分数。"};
+  if (radar && radar.ok === false) return {scored: false, reason: radar.error || "这轮没有算出分数。"};
+  if (preset && preset.pending === false && preset.reason) return {scored: false, reason: preset.reason};
+  if (!CORE_PERPS.includes(symbol)) {
+    return {scored: false, reason: preset?.reason || "只给 BTC、ETH、SOL、BNB 打分。这一行不编造方向或分数。"};
+  }
+  return {scored: false, reason: preset?.reason || "正在读取已收盘分数。读不到之前不会写成做多或做空。"};
+}
+
+function stanceHtml(symbol, preset) {
+  const stance = stanceRecord(symbol, preset);
+  if (!stance.scored) return `<span class="tiny">未评分：${esc(stance.reason)}</span>`;
+  const tone = stance.lean === "做多" ? "up" : stance.lean === "做空" ? "down" : "";
+  return `<span class="${tone}">${esc(stance.lean)}</span><div class="tiny">多 ${fmt(stance.score_long, 0)} / 空 ${fmt(stance.score_short, 0)}</div>`;
+}
+
+function stanceText(symbol) {
+  const stance = stanceRecord(symbol);
+  if (!stance.scored) return `未评分：${stance.reason}`;
+  return `${stance.lean} 多 ${fmt(stance.score_long, 0)} / 空 ${fmt(stance.score_short, 0)}`;
+}
+
+function paintStances() {
+  document.querySelectorAll("[data-stance]").forEach((node) => {
+    node.innerHTML = stanceHtml(node.dataset.stance);
+  });
+}
+
+async function refreshStances(symbols) {
+  const pending = [...new Set(symbols)].filter((symbol) => {
+    const radar = state.radar[symbol];
+    return CORE_PERPS.includes(symbol) && !state.radarLoading[symbol] && !(radar && (radar.conclusion || radar.ok === false));
+  });
+  if (!pending.length) {
+    paintStances();
+    return;
+  }
+  await Promise.all(pending.map(async (symbol) => {
+    state.radarLoading[symbol] = true;
+    try {
+      state.radar[symbol] = await api(`/api/radar?symbol=${encodeURIComponent(symbol)}`);
+    } catch (error) {
+      state.radar[symbol] = {ok: false, symbol, error: error.message, conclusion: {action: "无法判断", reason: error.message, score_long: null, score_short: null}};
+    } finally {
+      delete state.radarLoading[symbol];
+    }
+  }));
+  paintStances();
+  paintWatch();
+}
+
 function scanTable(rows) {
   if (!rows.length) return `<p class="hint">这一档没有可排名的行。</p>`;
-  return `<table><thead><tr><th></th><th>名称</th><th>代码</th><th>最新价</th><th>24h 涨跌</th><th>24h 成交额</th><th>EMA7</th><th>EMA10</th><th>EMA120</th><th>最近交叉</th><th>数据</th><th></th></tr></thead><tbody>${rows.map((row) => `<tr><td><button class="star ${state.favorites.includes(row.symbol) ? "on" : ""}" data-fav="${esc(row.symbol)}" type="button">★</button></td><td>${esc(row.base || row.symbol)}</td><td>${esc(row.symbol)}</td><td>${esc(row.price ?? "—")}</td><td>${change(row.change)}</td><td>${turnover(row.turnover)} USDT</td><td>${esc(row.ema7_vs_mid || "—")}</td><td>${esc(row.ema10_vs_mid || "—")}</td><td>${esc(row.ema120_vs_mid || "—")}</td><td>${esc(row.last_cross || "暂无交叉")}<div class="tiny">${esc(row.last_cross_time || "")}</div></td><td>${esc(row.kline_state || row.freshness || "")}</td><td><button class="ghost" data-go="charts" data-symbol="${esc(row.symbol)}" type="button">查看图表</button></td></tr>`).join("")}</tbody></table>`;
+  return `<div class="table-scroll"><table><thead><tr><th></th><th>名称</th><th>倾向 / 分数</th><th>最近交叉</th><th>最新价</th><th>24h 涨跌</th><th>24h 成交额</th><th>EMA7</th><th>EMA10</th><th>EMA120</th><th>数据</th><th></th></tr></thead><tbody>${rows.map((row) => `<tr><td><button class="star ${isStarred(row.symbol) ? "on" : ""}" data-fav="${esc(row.symbol)}" type="button">★</button></td><td><div class="name">${esc(row.base || row.symbol)}</div><div class="tiny">${esc(row.symbol)}</div></td><td data-stance="${esc(row.symbol)}">${stanceHtml(row.symbol, row.stance)}</td><td>${esc(row.last_cross || "暂无交叉")}<div class="tiny">${esc(shanghaiTime(row.last_cross_time))}</div></td><td>${esc(row.price ?? "—")}</td><td>${change(row.change)}</td><td>${turnover(row.turnover)} USDT</td><td>${esc(row.ema7_vs_mid || "—")}</td><td>${esc(row.ema10_vs_mid || "—")}</td><td>${esc(row.ema120_vs_mid || "—")}</td><td>${esc(row.kline_state || row.freshness || "")}</td><td><button class="ghost" data-go="charts" data-symbol="${esc(row.symbol)}" type="button">查看图表</button></td></tr>`).join("")}</tbody></table></div>`;
 }
 
 window.addEventListener("hashchange", () => show(location.hash.slice(1)));
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
-paintChrome();
-poll();
-api("/api/watchlist").then((data) => { applyWatchlist(data); paintWatch(); }).catch(() => {});
-show(location.hash.slice(1) || "overview");
+
+async function boot() {
+  try {
+    applyWatchlist(await api("/api/watchlist"));
+  } catch (error) {
+    state.watchlist = state.watchlist || {symbols: []};
+  }
+  paintChrome();
+  poll();
+  show(location.hash.slice(1) || "overview");
+}
+boot();
 
 function analysisHtml(radar) {
   const rows = (radar.history || []).map((item) => `<tr><td>${esc(item.time)}</td><td>${esc(radar.symbol)}</td><td>${esc(item.grade)}</td><td>${esc(item.side)}</td><td>${fmt(item.score_long, 0)} / ${fmt(item.score_short, 0)}</td><td>${esc(item.alert || "")}</td></tr>`).join("");

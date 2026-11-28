@@ -252,7 +252,21 @@ def create_app():
 
     @app.get("/api/monitor")
     def api_monitor(sort: str = "account", limit: int = 30, direction: str = "desc", watched: str = ""):
-        return monitor(sort, limit, direction, watched)
+        try:
+            return monitor(sort, limit, direction, watched)
+        except Exception as exc:
+            return {
+                "ok": True,
+                "error": f"实盘监控暂时打不开：{type(exc).__name__}",
+                "rows": [],
+                "positions": [],
+                "watched_positions": [],
+                "positions_pending": False,
+                "source": "Hyperliquid 公开持仓与排行榜",
+                "venue": "Hyperliquid",
+                "notice": "这里是 Hyperliquid 公开交易员持仓，不是你的 Bitget 账户，也不能下单。",
+                "account_value_note": "榜单账户价值和永续权益不是同一个字段。",
+            }
 
     @app.get("/api/monitor/wallet")
     def api_wallet_get(address: str = ""):
