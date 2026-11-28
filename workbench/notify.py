@@ -16,6 +16,14 @@ from workbench.crosses import ARCHIVED_ALERTS, ACTIVE_ALERTS
 from workbench.engine_path import PACKAGE
 
 CHANNELS = ("in_app", "browser", "email", "telegram_channel", "telegram_dm", "sound")
+CHANNEL_COPY = {
+    "in_app": {"label": "页面里", "detail": "只在这个页面打开时出现"},
+    "browser": {"label": "浏览器通知", "detail": "需要允许通知，关掉页面后到不了"},
+    "email": {"label": "邮箱", "detail": "服务器配好邮箱后才能发出"},
+    "telegram_channel": {"label": "Telegram 频道", "detail": "服务器配好机器人后才能发到频道"},
+    "telegram_dm": {"label": "Telegram 私聊", "detail": "服务器配好机器人后才能发到私聊"},
+    "sound": {"label": "提示音", "detail": "只在这个页面打开时响"},
+}
 
 
 def _present(name):
@@ -85,6 +93,7 @@ def channel_config():
         "archived_alerts": list(ARCHIVED_ALERTS),
         "trader_events_default": False,
         "enabled": load_prefs(),
+        "copy": CHANNEL_COPY,
         "position_changes": "持仓变化是单独一类，默认关闭，不会和六种指标交叉混在一起推送。",
     }
 
@@ -94,6 +103,7 @@ def runtime_status():
         "web_process_is_24h": False,
         "render_free_sleeps": True,
         "reason": "Render 免费 Web 空闲会休眠，关页后这个网站进程不能保证继续监控。",
+        "user_note": "关掉页面后，这个免费网站不能保证继续提醒。邮箱和 Telegram 要等服务器配好，并且有一台不休眠的检查程序，才会在关页后发出。",
         "always_on_command": "python -m workbench.monitor_worker",
         "always_on_note": "把这条命令跑在不休眠的 Worker 或常驻机器上，才会在关页后继续检查并发邮箱或 Telegram。免费 Web 进程本身不是 24 小时服务。",
     }

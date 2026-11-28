@@ -11,7 +11,7 @@ import math
 import os
 import time
 from datetime import datetime
-from threading import Lock
+from threading import Event, Lock, Thread
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -77,7 +77,11 @@ _DIR = {"at": 0.0, "rows": None, "fetched": None, "error": None}
 _FRAMES = {}
 _RADAR = {}
 _CAL = {"at": 0.0, "payload": None}
-_BOARD = {"at": 0.0, "rows": None, "error": None}
+_BOARD = {
+    "at": 0.0, "rows": None, "error": None, "fetched_at": None,
+    "positions": [], "omitted": [], "equities": {},
+    "refreshing": False, "event": None,
+}
 CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 BOARD_URL = "https://stats-data.hyperliquid.xyz/Mainnet/leaderboard"
 HL_INFO = "https://api.hyperliquid.xyz/info"
@@ -1059,10 +1063,13 @@ def parse_leaderboard(payload, sort="account", limit=30, direction="desc"):
             except (TypeError, ValueError):
                 return None
         day = num("day", "vlm")
+        display_name = (item.get("displayName") or "").strip()
+        label, source = trader_label(display_name, "", item.get("ethAddress"))
         rows.append({
             "address": item.get("ethAddress"),
-            "name": (item.get("displayName") or "").strip() or "未公开昵称",
-            "name_source": "displayName" if (item.get("displayName") or "").strip() else "none",
+            "display_name": display_name or None,
+            "name": label,
+            "name_source": source,
             "max_drawdown": None,
             "trade_count": None,
             "win_rate": None,
@@ -1089,6 +1096,23 @@ def short_address(address):
     if not isinstance(address, str) or len(address) < 10:
         return address or ""
     return f"{address[:6]}…{address[-4:]}"
+
+
+def trader_label(display_name, note, address):
+    """Nickname order is displayName, then a saved note, then the short address.
+
+    A missing public name is not replaced with an invented trader name.
+    """
+    display = display_name.strip() if isinstance(display_name, str) else ""
+    if display:
+        return display, "displayName"
+    remark = note.strip() if isinstance(note, str) else ""
+    if remark:
+        return remark, "note"
+    short = short_address(address)
+    if short:
+        return short, "address"
+    return "未公开昵称", "none"
 
 
 def _optional_float(value):
@@ -1121,8 +1145,11 @@ def parse_positions(payload, address, name="", dex=""):
             leverage = leverage.get("value")
         rows.append({
             "address": address,
+            "display_name": display or None,
             "name": display,
+            "name_source": "displayName" if display else ("address" if address else "none"),
             "label": display or short_address(address),
+            "venue": "Hyperliquid",
             "coin": position.get("coin"),
             "side": "多" if size > 0 else "空",
             "size": abs(size),
@@ -1176,7 +1203,7 @@ def _split_addresses(value):
     return found[:12]
 
 
-def _post_info(body, timeout=(2, 4)):
+def _post_info(body, timeout=(2, 3)):
     response = requests.post(
         HL_INFO, json=body, timeout=timeout, headers={"User-Agent": "quant-signal-lab-research"},
     )
@@ -1205,12 +1232,12 @@ def perp_dex_names():
     return names
 
 
-def _fetch_states(traders, include_other_dexes=False):
+def _fetch_states(traders, include_other_dexes=False, dex_limit=3, timeout=(2, 3)):
     from concurrent.futures import ThreadPoolExecutor
 
     dexes = [""]
     if include_other_dexes:
-        dexes.extend(perp_dex_names())
+        dexes.extend(list(perp_dex_names())[:dex_limit])
 
     def one(job):
         trader, dex = job
@@ -1219,86 +1246,175 @@ def _fetch_states(traders, include_other_dexes=False):
         if dex:
             body["dex"] = dex
         try:
-            payload = _post_info(body)
+            payload = _post_info(body, timeout=timeout)
         except (requests.RequestException, ValueError):
             return None
-        return {"address": address, "name": trader.get("name") or "", "dex": dex, "payload": payload}
+        display = (trader.get("display_name") or trader.get("name") or "")
+        return {
+            "address": address,
+            "name": display if trader.get("display_name") else (trader.get("name") or ""),
+            "display_name": trader.get("display_name") or "",
+            "dex": dex,
+            "payload": payload,
+        }
 
     jobs = [(trader, dex) for trader in traders if trader.get("address") for dex in dexes]
     if not jobs:
         return []
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=4) as pool:
         return [item for item in pool.map(one, jobs) if item]
 
 
-def monitor(sort="account", limit=30, direction="desc", watched=""):
-    now = time.time()
-    stale = False
-    error = None
+def _load_leaderboard(timeout=(3, 8)):
+    response = requests.get(BOARD_URL, timeout=timeout, headers={"User-Agent": "quant-signal-lab-research"})
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("leaderboard")
+    return payload
+
+
+def _remember_board(payload):
+    stamp = beijing(now_ms())
     with _LOCK:
-        fresh = _BOARD["rows"] if _BOARD.get("rows") is not None and now - _BOARD.get("at", 0) < 60 else None
-        stored = _BOARD.get("rows")
-        stored_at = _BOARD.get("fetched_at")
-        stored_positions = list(_BOARD.get("positions") or [])
-        stored_equities = dict(_BOARD.get("equities") or {})
-    payload = fresh
-    if payload is None:
-        try:
-            response = requests.get(BOARD_URL, timeout=(3, 6), headers={"User-Agent": "quant-signal-lab-research"})
-            response.raise_for_status()
-            payload = response.json()
-            stored_at = beijing(now_ms())
-            with _LOCK:
-                _BOARD.update(at=time.time(), rows=payload, error=None, fetched_at=stored_at)
-        except (requests.RequestException, ValueError) as exc:
-            error = f"Hyperliquid 公开排行榜暂时取不到：{type(exc).__name__}"
-            payload = stored
-            stale = payload is not None
-    rows = parse_leaderboard(payload, sort, limit, direction) if isinstance(payload, dict) else []
-    omitted = []
-    if fresh is not None:
-        positions = stored_positions
-        with _LOCK:
-            omitted = list(_BOARD.get("omitted") or [])
-        for row in rows:
-            if row.get("address") in stored_equities:
-                row["perp_account_value"] = stored_equities[row["address"]]
-    elif isinstance(payload, dict):
-        active = parse_leaderboard(payload, sort="day_vlm", limit=8, direction="desc")
-        batch = []
+        _BOARD.update(at=time.time(), rows=payload, error=None, fetched_at=stamp)
+    return stamp
+
+
+def _refresh_public_positions(payload):
+    """Clearinghouse reads stay off the first HTTP response."""
+    try:
+        active = parse_leaderboard(payload, sort="day_vlm", limit=6, direction="desc")
         seen = set()
-        for trader in list(rows[:5]) + active:
+        batch = []
+        for trader in active:
             address = trader.get("address")
-            if address and address not in seen:
-                seen.add(address)
-                batch.append(trader)
+            if not address or address in seen:
+                continue
+            seen.add(address)
+            batch.append({
+                "address": address,
+                "display_name": trader.get("display_name") or "",
+                "name": trader.get("display_name") or "",
+            })
         states = _fetch_states(batch, include_other_dexes=False)
         positions, omitted, equities = open_positions_from_states(states)
-        for row in rows:
-            if row.get("address") in equities:
-                row["perp_account_value"] = equities[row["address"]]
         with _LOCK:
             _BOARD["positions"] = positions
             _BOARD["omitted"] = omitted
             _BOARD["equities"] = equities
-    else:
-        positions = stored_positions
+            _BOARD["positions_checked"] = True
+            _BOARD["position_error"] = None
+    except Exception as exc:
         with _LOCK:
-            omitted = list(_BOARD.get("omitted") or [])
+            _BOARD["positions_checked"] = False
+            _BOARD["position_error"] = f"公开持仓这次没有读完：{type(exc).__name__}"
+
+
+def _kick_board_refresh():
+    """One background refresh. Callers can wait briefly, never for the proxy timeout."""
+    with _LOCK:
+        if _BOARD.get("refreshing") and _BOARD.get("event") is not None:
+            return _BOARD["event"]
+        event = Event()
+        _BOARD["refreshing"] = True
+        _BOARD["event"] = event
+
+    def run():
+        try:
+            payload = _load_leaderboard()
+            _remember_board(payload)
+            _refresh_public_positions(payload)
+        except (requests.RequestException, ValueError) as exc:
+            with _LOCK:
+                _BOARD["error"] = f"Hyperliquid 公开排行榜暂时取不到：{type(exc).__name__}"
+        finally:
+            with _LOCK:
+                _BOARD["refreshing"] = False
+            event.set()
+
+    Thread(target=run, daemon=True).start()
+    return event
+
+
+def warm_monitor():
+    """Start the public board before the first visitor so the page is not cold."""
+    try:
+        _kick_board_refresh()
+    except Exception:
+        return
+
+
+def _board_snapshot():
+    now = time.time()
+    with _LOCK:
+        payload = _BOARD.get("rows")
+        age = None if payload is None else now - _BOARD.get("at", 0)
+        return {
+            "payload": payload,
+            "age": age,
+            "stored_at": _BOARD.get("fetched_at"),
+            "positions": list(_BOARD.get("positions") or []),
+            "omitted": list(_BOARD.get("omitted") or []),
+            "equities": dict(_BOARD.get("equities") or {}),
+            "error": _BOARD.get("error"),
+            "refreshing": bool(_BOARD.get("refreshing")),
+            "positions_checked": bool(_BOARD.get("positions_checked")),
+            "position_error": _BOARD.get("position_error"),
+        }
+
+
+def monitor(sort="account", limit=30, direction="desc", watched="", wait_seconds=4):
+    """Return public Hyperliquid data without holding the request open.
+
+    A cold leaderboard waits at most ``wait_seconds``. Position fan-out runs
+    in the background. Upstream failure stays ``ok: true`` so the page can
+    explain it instead of surfacing a gateway 502.
+    """
+    snap = _board_snapshot()
+    old = snap["payload"] is not None and (snap["age"] or 0) >= 60
+    if snap["payload"] is None or old:
+        event = _kick_board_refresh()
+        if snap["payload"] is None and event is not None:
+            event.wait(timeout=max(0, float(wait_seconds)))
+            snap = _board_snapshot()
+    payload = snap["payload"]
+    error = snap["error"]
+    positions = snap["positions"]
+    omitted = snap["omitted"]
+    equities = snap["equities"]
+    pending = bool(snap["refreshing"]) and not snap.get("positions_checked") and not positions
+    if payload is None and snap["refreshing"] and not error:
+        pending = True
+    position_error = snap.get("position_error")
+    if payload is not None and not positions and not snap.get("positions_checked") and not snap["refreshing"] and not position_error:
+        position_error = "公开持仓这次没有读完。"
+    rows = parse_leaderboard(payload, sort, limit, direction) if isinstance(payload, dict) else []
+    for row in rows:
+        if row.get("address") in equities:
+            row["perp_account_value"] = equities[row["address"]]
     watched_positions = []
     watched_errors = []
-    watched_rows = [{"address": address, "name": ""} for address in _split_addresses(watched)]
+    watched_rows = [{"address": address, "display_name": "", "name": ""} for address in _split_addresses(watched)]
     if watched_rows:
-        states = _fetch_states(watched_rows, include_other_dexes=True)
-        watched_positions, _ignored, _equities = open_positions_from_states(states, per_address=20)
-        failed = set(_split_addresses(watched)) - {item.get("address") for item in states}
-        watched_errors.extend({"address": address, "error": "读取失败"} for address in failed)
+        try:
+            states = _fetch_states(watched_rows[:6], include_other_dexes=False, timeout=(1.5, 2))
+            watched_positions, _ignored, _equities = open_positions_from_states(states, per_address=20)
+            failed = {item["address"] for item in watched_rows} - {item.get("address") for item in states}
+            watched_errors.extend({"address": address, "error": "读取失败"} for address in failed)
+        except Exception:
+            watched_errors = [{"address": item["address"], "error": "读取失败"} for item in watched_rows]
+    if payload is None and not pending and not error:
+        error = "Hyperliquid 公开排行榜暂时取不到。"
     return {
         "ok": True,
-        "stale": stale,
+        "stale": bool(error) and payload is not None,
         "error": error,
-        "updated_at": stored_at,
+        "positions_pending": pending,
+        "position_error": position_error,
+        "updated_at": snap["stored_at"],
         "source": "Hyperliquid 公开持仓与排行榜",
+        "venue": "Hyperliquid",
         "notice": "这里是 Hyperliquid 公开交易员持仓，不是你的 Bitget 账户，也不能下单。没有交易密钥。刷新公开榜不会改你保存在浏览器里的自选地址。",
         "account_value_note": "榜单 account_value 是 Hyperliquid 排行榜字段。perp_account_value 才是同一地址永续 clearinghouse 的权益，两者经常不一致。",
         "rows": rows,
@@ -1413,6 +1529,34 @@ def _required(body, key, lo, hi):
     return value
 
 
+def unscored_stance(symbol):
+    """Scanner lean stays empty unless the closed-bar scorer produced it.
+
+    Calling this does not score the symbol and does not loosen the 做多/做空 gate.
+    Core symbols stay pending so the page can read /api/radar. Everything else
+    gets an explicit reason instead of a made-up direction.
+    """
+    if symbol in CORE_SYMBOLS:
+        return {
+            "scored": False,
+            "pending": True,
+            "lean": None,
+            "action": None,
+            "score_long": None,
+            "score_short": None,
+            "reason": "正在读取已收盘分数。读不到之前不会写成做多或做空。",
+        }
+    return {
+        "scored": False,
+        "pending": False,
+        "lean": None,
+        "action": None,
+        "score_long": None,
+        "score_short": None,
+        "reason": "只给 BTC、ETH、SOL、BNB 打分。这一行不编造方向或分数。",
+    }
+
+
 def market_scan(product="crypto_perp", interval="15m", cross_filter="all"):
     """Top 20 by USDT turnover inside one product class, plus cross state."""
     payload = directory()
@@ -1434,14 +1578,16 @@ def market_scan(product="crypto_perp", interval="15m", cross_filter="all"):
                 "ema10_vs_mid": snap.get("ema10_vs_mid"),
                 "ema120_vs_mid": snap.get("ema120_vs_mid"),
                 "last_cross": last["type"],
-                "last_cross_time": last["time"],
+                "last_cross_time": beijing(last["time"]) if last.get("time") not in (None, "") else None,
                 "kline_state": "已用收盘K线" if snap.get("ready") else (snap.get("reason") or "K线不足"),
+                "stance": unscored_stance(row.get("symbol")),
             })
         except Exception as exc:
             row.update({
                 "ema7_vs_mid": "数据不足", "ema10_vs_mid": "数据不足", "ema120_vs_mid": "数据不足",
                 "last_cross": "暂无交叉", "last_cross_time": None,
                 "kline_state": f"K线不可用：{exc}",
+                "stance": unscored_stance(row.get("symbol")),
             })
     if cross_filter == "up":
         ranked = [row for row in ranked if "上穿" in (row.get("last_cross") or "")]

@@ -275,6 +275,17 @@ class ApiTests(unittest.TestCase):
         self.assertNotIn('["risk","风险与仓位"]', blob.replace(" ", ""))
         self.assertIn("无法判断", blob)
         self.assertIn("做多", blob)
+        self.assertIn("信号实验室 8.0", blob)
+        self.assertNotIn("7.1", blob)
+        import re
+        nav = re.search(r"const NAV = \[(.*?)\];", blob, re.S)
+        self.assertIsNotNone(nav)
+        for label in ("跨市场", "经济日历", "指标设置"):
+            self.assertNotIn(label, nav.group(1))
+        self.assertIn("市场总览", nav.group(1))
+        self.assertIn("async calendar()", blob)
+        self.assertIn("还没有分析结果", blob)
+        self.assertIn("还没有回测结果", blob)
 
 
 class ScoreRuleTests(unittest.TestCase):

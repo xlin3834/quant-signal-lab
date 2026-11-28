@@ -1,4 +1,4 @@
-const SHELL = "signal-lab-shell-v4";
+const SHELL = "signal-lab-shell-v5";
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(SHELL).then((cache) => cache.addAll(["/", "/static/css/app.css", "/static/js/app.js", "/static/js/chart.js"])));

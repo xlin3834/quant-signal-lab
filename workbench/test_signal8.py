@@ -119,13 +119,67 @@ class AlertTests(unittest.TestCase):
 
 class LeaderboardNameTests(unittest.TestCase):
     def test_missing_display_name_is_not_invented(self):
-        from workbench.research import parse_leaderboard
+        from workbench.research import parse_leaderboard, trader_label
+        address = "0x" + "ab" * 20
         rows = parse_leaderboard({"leaderboardRows": [
-            {"ethAddress": "0xdef", "accountValue": "9", "displayName": None, "windowPerformances": []},
+            {"ethAddress": address, "accountValue": "9", "displayName": None, "windowPerformances": []},
         ]})
-        self.assertEqual(rows[0]["name"], "未公开昵称")
+        self.assertIsNone(rows[0]["display_name"])
+        self.assertEqual(rows[0]["name_source"], "address")
+        self.assertEqual(rows[0]["name"], "0xabab…abab")
+        self.assertNotIn("交易员", rows[0]["name"])
         self.assertIsNone(rows[0]["win_rate"])
         self.assertEqual(rows[0]["stats_note"], "暂无数据")
+        named = parse_leaderboard({"leaderboardRows": [
+            {"ethAddress": address, "accountValue": "9", "displayName": "Desk", "windowPerformances": []},
+        ]})
+        self.assertEqual(named[0]["name"], "Desk")
+        self.assertEqual(named[0]["name_source"], "displayName")
+        self.assertEqual(trader_label("", "备注甲", address), ("备注甲", "note"))
+        self.assertEqual(trader_label("Desk", "备注甲", address)[0], "Desk")
+
+
+class ScannerAndMonitorTests(unittest.TestCase):
+    def test_cross_time_is_shanghai_and_unscored_rows_have_no_lean(self):
+        from unittest.mock import patch
+        from workbench.research import beijing, unscored_stance
+        self.assertEqual(beijing(1714521600000), "2024-05-01 08:00:00")
+        with patch("workbench.research.radar") as radar:
+            stance = unscored_stance("DOGEUSDT")
+            core = unscored_stance("BTCUSDT")
+            radar.assert_not_called()
+        self.assertFalse(stance["scored"])
+        self.assertIsNone(stance["lean"])
+        self.assertIn("不编造", stance["reason"])
+        self.assertIsNone(core["lean"])
+        self.assertTrue(core["pending"])
+
+    def test_monitor_upstream_failure_stays_ok(self):
+        import requests
+        from threading import Thread
+        from unittest.mock import patch
+        from workbench import research
+
+        research._BOARD.clear()
+        research._BOARD.update(
+            at=0.0, rows=None, error=None, positions=[], omitted=[], equities={},
+            refreshing=False, event=None, fetched_at=None, positions_checked=False,
+            position_error=None,
+        )
+
+        class Immediate(Thread):
+            def start(self):
+                self.run()
+
+        with patch("workbench.research.Thread", Immediate), \
+             patch("workbench.research._load_leaderboard", side_effect=requests.ConnectionError("down")):
+            body = research.monitor(wait_seconds=0)
+        self.assertTrue(body["ok"])
+        self.assertIn("暂时取不到", body["error"] or "")
+        self.assertEqual(body["rows"], [])
+        self.assertEqual(body["positions"], [])
+        self.assertFalse(body["positions_pending"])
+        self.assertIn("不是你的 Bitget 账户", body["notice"])
 
 
 if __name__ == "__main__":
